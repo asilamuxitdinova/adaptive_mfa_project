@@ -11,7 +11,7 @@ Tracks the progress of turning the adaptive MFA approach from the paper below in
 | Step | Description | Status |
 |---|---|---|
 | 1 | Simulation demo of the paper's adaptive selection approach | ✅ Done |
-| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 (data preparation) done on the GPU server; Stage 2 next |
+| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 done on the GPU server; Stage 2 started with the keystroke verifier (code ready, server training next) |
 
 ---
 
@@ -80,16 +80,21 @@ adaptive_mfa_project/
 ├── src/
 │   ├── metrics.py              # shared EER / FAR / FRR calculation
 │   ├── pairs.py                # same-person / different-person pair building
-│   └── verifiers/              # face, voice, keystroke verifiers (Stage 2)
+│   ├── keystroke_data.py       # Aalto sentences -> padded key-timing sequences
+│   └── verifiers/
+│       └── keystroke.py        # baseline + TypeNet-style LSTM verifier (Stage 2)
 ├── scripts/
 │   ├── inspect_datasets.py     # Stage 1 dataset inspection
-│   └── prepare_data.py         # Stage 1 download + pair building
+│   ├── prepare_data.py         # Stage 1 download + pair building
+│   ├── train_keystroke.py      # Stage 2 keystroke training
+│   └── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 19 tests, all passing
+└── tests/                      # 25 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
-    └── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
+    ├── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
+    └── test_keystroke.py       # keystroke pipeline on synthetic typists
 ```
 
 **Set up and run:**
@@ -145,6 +150,33 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
 - treats a scene classifier as an **optional extra** (the complete 10-scene TUT 2018 dataset, 15 GB, could be added later on the server).
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
+### Stage 2: Keystroke verifier (code ready, not yet trained on real data)
+
+**Approach**, following TypeNet (Acien et al., *IEEE T-BIOM* 2021), which introduced deep keystroke verification on this Aalto dataset:
+- Each typed sentence becomes a sequence of up to 50 keys; each key has its code and four timings: hold time (`hl`) and three gaps to the next key (`il`, `pl`, `rl`). Timings are standardized with training statistics only.
+- A 2-layer **LSTM** turns the sequence into a 128-number embedding (a "typing fingerprint"), trained with **batch-hard triplet loss**: each batch has 64 participants × 5 sentences, and the model learns to place one person's sentences closer together than anyone else's.
+- About 500 of the 10,000 training participants are held out for **validation**; the model with the best validation EER is kept, with early stopping.
+- A **baseline with no training** (mean / std / median of each timing, compared by distance) is evaluated alongside it, to show what training adds.
+- Testing uses `keystroke_test.csv`: **2,000 participants never seen in training**, 20,000 pairs of single sentences. Results are compared with the paper's Table I keystroke values (FAR 7%, FRR 0.1%, crossover 1.8%).
+
+**Run on the server:**
+```bash
+python scripts/train_keystroke.py --epochs 3 --limit-users 500   # quick check that everything runs
+python scripts/train_keystroke.py                                # full training on the GPU
+python scripts/evaluate_keystroke.py                             # EER / FAR / FRR on test participants
+```
+
+| Output | Contents |
+|---|---|
+| `models/keystroke_typenet.pt` | Best model + settings (gitignored) |
+| `results/keystroke_training_log.csv` | Loss and validation EER per epoch |
+| `results/keystroke_results.md` / `.json` | Test EER / FAR / FRR, baseline vs trained model vs paper |
+| `results/keystroke_scores.png` | Genuine vs impostor score distributions |
+
+**Sanity check on synthetic data (laptop):** 80 fake typists with distinct rhythms, 30 unseen test typists → baseline EER 10%, trained model **4%**. This only shows the pipeline learns; synthetic typing is far easier than real typing.
+
+**Options:** `prepare_data.py --keystroke-train-users 0` rebuilds the pairs with all ~78,000 training participants (TypeNet used ~68,000) for a larger training run.
+
 ### Planned stages
 
 - [x] **Stage 1: Dataset preparation.**
@@ -153,9 +185,14 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
   - [x] Set up the server (Python 3.12 via `uv`, `hf auth login`) and run `prepare_data.py` there
   - [x] Check the generated pairs and `data/MANIFEST.json` on the server
   - [x] Found that the TAU copy has only 4 of 10 scenes; replaced it with DEMAND
-  - [ ] Download DEMAND on the server (`--only noise`) and delete the unused TAU files (`data/raw/scenes`, `data/pairs/scenes_*.csv`)
+  - [x] Download DEMAND on the server (`--only noise`): 17 environments, 1,275 clips, 901 train / 374 test ✅
+  - [ ] Delete the unused TAU files on the server (`data/raw/scenes`, `data/pairs/scenes_*.csv`)
   - [ ] Request access to the gated datasets (full VoxCeleb), only if needed later
-- [ ] **Stage 2: Per-factor verifiers.** Use pretrained embedding models (e.g. a face-embedding model for faces, SpeechBrain ECAPA for speaker verification) and train a small classifier for keystroke dynamics. Measure real **EER, FAR and FRR** for each factor.
+- [ ] **Stage 2: Per-factor verifiers.** *(in progress)* Measure real **EER, FAR and FRR** for each factor. Face and voice use pretrained models (evaluation only); keystroke is the only model trained here.
+  - [x] Keystroke verifier code: data loader, baseline, TypeNet-style LSTM, training and evaluation scripts, tested on synthetic typists (see below)
+  - [ ] Train the keystroke model on the server and evaluate it on the test participants
+  - [ ] Face verifier on LFW (pretrained model, evaluation only)
+  - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
 - [ ] **Stage 4: Context sensing.** Train a human-activity classifier (walking vs still) on the motion data. Light (lux) and noise level (dB) are measured directly from the device's sensors, so no model is needed for them. A scene classifier is optional.
 - [ ] **Stage 5: Learned trust function.** Convert measured accuracy into trust values per factor and per context, replacing the hard-coded Table II.
