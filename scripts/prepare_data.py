@@ -6,7 +6,7 @@ identical data) into data/raw/<name>/, and the derived files go into data/pairs/
 Nothing in data/ is committed to git; run this script on each machine instead.
 
 Run from the project root:
-    python scripts/prepare_data.py                     # everything (~2.4 GB)
+    python scripts/prepare_data.py                     # everything (~1.3 GB)
     python scripts/prepare_data.py --only face voice   # just some datasets
     python scripts/prepare_data.py --dry-run           # show what would be downloaded
     python scripts/prepare_data.py --skip-download     # rebuild pairs from existing downloads
@@ -15,12 +15,12 @@ Outputs (paths in the CSVs are relative to the project root):
     data/pairs/face_test.csv          LFW official 6,000 pairs (10 folds)
     data/pairs/voice_{train,test}.csv speaker pairs, speaker-disjoint train/test
     data/pairs/keystroke_{train,test}.csv sentence pairs, participant-disjoint train/test
-    data/pairs/scenes_{train,test}.csv acoustic scene labels, location-disjoint train/test
+    data/pairs/noise_{train,test}.csv  background noise clips per environment, time-split train/test
     data/pairs/motion_segments.csv     labelled activity segments (moving vs still)
     data/MANIFEST.json                 what was downloaded, revisions and counts
 
 Set HF_HOME to a large disk on servers; downloads are skipped when already present.
-LFW and the scene dataset are ~10,000 small files each, and anonymous Hugging Face
+LFW is ~13,000 small files, and anonymous Hugging Face
 downloads are rate-limited: log in once with `hf auth login` (free token) for faster
 downloads. An interrupted download resumes where it stopped when re-run.
 """
@@ -59,8 +59,8 @@ SOURCES = {
                     "Voice verification (mini VoxCeleb1)", "research use (VoxCeleb terms)"),
     "keystroke": Source("onepunchdimash/aalto_keystroke_features_normalized", "7190311c9635848d0f603913c5bc03ca47c25fbc",
                         "Keystroke dynamics (Aalto 136M keystrokes)", "research use (Aalto study)"),
-    "scenes": Source("quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5", "f8279077c020195bc8828ffe11e8a2647929d3a6",
-                     "Acoustic scenes / noise (TAU 2022 mobile)", "non-commercial research"),
+    "noise": Source("SPARCO-project/benchmark_DEMAND_noise", "9494656cfa837f881a718db97111c35d331a6e5b",
+                    "Background noise (DEMAND, 17 environments)", "CC BY 4.0 / CC BY-SA 3.0 (see DEMAND)"),
     "motion": Source("DiFronzo/Human_Activity_Recognition", "578af74e6d9abf50e091ad2292a79dda85998e0f",
                      "Human activity / motion (smartphone IMU)", "not stated"),
 }
@@ -175,45 +175,44 @@ def build_keystroke(raw: Path, rng, args):
     return stats
 
 
-def scene_location(filename: str) -> str:
-    """'audio/airport-barcelona-203-6129-0-a.wav' -> 'airport-barcelona-203' (one recording location)."""
-    return "-".join(Path(filename).stem.split("-")[:3])
+NOISE_ENVIRONMENTS = {   # DEMAND recordings: code -> (category, description)
+    "DKITCHEN": ("domestic", "kitchen"), "DLIVING": ("domestic", "living room"),
+    "DWASHING": ("domestic", "laundry room"), "NFIELD": ("nature", "sports field"),
+    "NPARK": ("nature", "park"), "NRIVER": ("nature", "river"),
+    "OHALLWAY": ("office", "hallway"), "OMEETING": ("office", "meeting room"),
+    "OOFFICE": ("office", "office"), "PCAFETER": ("public", "cafeteria"),
+    "PRESTO": ("public", "restaurant"), "PSTATION": ("public", "train station"),
+    "SPSQUARE": ("street", "public square"), "STRAFFIC": ("street", "traffic"),
+    "TBUS": ("transport", "bus"), "TCAR": ("transport", "car"), "TMETRO": ("transport", "metro"),
+}
 
 
-def build_scenes(raw: Path, rng, args):
+def build_noise(raw: Path, rng, args):
     """
-    Scene labels from the tab-separated DCASE lists. The Hugging Face copy contains only
-    10,000 of the listed clips (1,894 of the train list, 8,106 of the test list), so the
-    downloaded clips are pooled and re-split, keeping every recording location entirely
-    in train or in test, separately for each scene so all scenes appear in both.
+    Real background noise (DEMAND: 4-second, 16 kHz clips, 75 per environment) to mix into
+    voice clips in Stage 3. The repo's own splits put different environments in each split;
+    we need every environment in both, so each recording is split by time: its first clips
+    go to train and its last clips to test (contiguous, so no audio is shared).
     """
-    labels, missing = {}, 0
-    for listing in ("fold1_train.csv", "fold1_evaluate.csv"):
-        with (raw / "evaluation_setup" / listing).open(encoding="utf-8") as f:
-            for r in csv.DictReader(f, delimiter="\t"):
-                if (raw / r["filename"]).exists():
-                    labels[r["filename"]] = r["scene_label"]
-                else:
-                    missing += 1
-
-    by_scene = {}
-    for filename, scene in labels.items():
-        by_scene.setdefault(scene, {}).setdefault(scene_location(filename), []).append(filename)
+    clips = {}
+    for wav in sorted(raw.glob("data/*/*/*.wav")):
+        clips.setdefault(wav.parent.name, []).append(wav)
+    unknown = sorted(set(clips) - set(NOISE_ENVIRONMENTS))
+    if unknown:
+        print(f"    warning: unknown environments kept without description: {', '.join(unknown)}")
 
     split = {"train": [], "test": []}
-    for scene in sorted(by_scene):
-        locations = by_scene[scene]
-        if len(locations) < 2:          # cannot hold out a location; keep it for training
-            train_locs, test_locs = sorted(locations), []
-        else:
-            train_locs, test_locs = split_ids(locations, args.scenes_test_fraction, rng)
-        for name, locs in (("train", train_locs), ("test", test_locs)):
-            split[name] += [(rel(raw / f), scene, loc) for loc in locs for f in sorted(locations[loc])]
+    for env in sorted(clips):
+        files = sorted(clips[env], key=lambda p: p.stem)       # ..._000000 ... _000074 = time order
+        n_test = max(1, round(len(files) * args.noise_test_fraction))
+        category, description = NOISE_ENVIRONMENTS.get(env, ("unknown", env.lower()))
+        for name, part in (("train", files[:-n_test]), ("test", files[-n_test:])):
+            split[name] += [(rel(f), env, category, description) for f in part]
 
-    stats = {"scenes_clips_downloaded": len(labels), "scenes_listed_but_not_in_repo": missing,
-             "scenes_classes": len(by_scene), "scenes_locations": sum(map(len, by_scene.values()))}
+    stats = {"noise_environments": len(clips), "noise_clips": sum(map(len, clips.values()))}
     for name, rows in split.items():
-        stats[f"scenes_{name}_clips"] = write_csv(PAIRS / f"scenes_{name}.csv", ["path", "scene", "location"], rows)
+        stats[f"noise_{name}_clips"] = write_csv(PAIRS / f"noise_{name}.csv",
+                                                 ["path", "environment", "category", "description"], rows)
     return stats
 
 
@@ -243,7 +242,7 @@ def build_motion(raw: Path, rng, args):
 
 
 BUILDERS = {"face": build_face, "voice": build_voice, "keystroke": build_keystroke,
-            "scenes": build_scenes, "motion": build_motion}
+            "noise": build_noise, "motion": build_motion}
 
 
 # ---------------------------------------------------------------- main
@@ -257,8 +256,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="random seed for splits and pairs (default 42)")
     parser.add_argument("--test-fraction", type=float, default=1 / 3,
                         help="fraction of people held out for testing (voice, keystroke if re-split; default 1/3)")
-    parser.add_argument("--scenes-test-fraction", type=float, default=0.3,
-                        help="fraction of recording locations per scene held out for testing (default 0.3)")
+    parser.add_argument("--noise-test-fraction", type=float, default=0.3,
+                        help="fraction of each noise recording (by time) held out for testing (default 0.3)")
     parser.add_argument("--keystroke-train-users", type=int, default=10_000, help="max participants for training pairs (0 = all)")
     parser.add_argument("--keystroke-test-users", type=int, default=2_000, help="max participants for test pairs (0 = all)")
     parser.add_argument("--keystroke-pairs-per-user", type=int, default=5, help="genuine pairs per participant")
@@ -276,6 +275,7 @@ def main():
 
     manifest_path = DATA / "MANIFEST.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    manifest = {k: v for k, v in manifest.items() if k in SOURCES}   # drop datasets no longer used
     for name in names:
         src = SOURCES[name]
         print(f"\n[{name}] {src.purpose}")

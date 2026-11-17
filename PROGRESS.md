@@ -86,7 +86,7 @@ adaptive_mfa_project/
 │   └── prepare_data.py         # Stage 1 download + pair building
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 20 tests, all passing
+└── tests/                      # 19 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
     └── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
@@ -109,7 +109,7 @@ python scripts/inspect_datasets.py                                 # writes resu
 
 ```bash
 # on the server, from the project root (set HF_HOME to a large disk first)
-python scripts/prepare_data.py --dry-run           # list datasets and sizes (~2.4 GB total)
+python scripts/prepare_data.py --dry-run           # list datasets and sizes (~1.3 GB total)
 python scripts/prepare_data.py                     # download everything and build pairs
 python scripts/prepare_data.py --only face voice   # or just some datasets
 ```
@@ -119,12 +119,12 @@ python scripts/prepare_data.py --only face voice   # or just some datasets
 | `face_test.csv` | LFW's official 6,000 pairs in 10 folds (standard benchmark) |
 | `voice_train.csv`, `voice_test.csv` | Same / different speaker clip pairs; **speakers re-split** 20 train / 10 test, because the repo's own splits share all 30 speakers |
 | `keystroke_train.csv`, `keystroke_test.csv` | Same / different participant sentence pairs; **no participant in both** (default caps: 10,000 train and 2,000 test participants, 5 genuine pairs each) |
-| `scenes_train.csv`, `scenes_test.csv` | Acoustic scene labels for the noise / environment classifier; the 10,000 downloaded clips are **pooled and re-split ~70 / 30 by recording location**, per scene (see below) |
+| `noise_train.csv`, `noise_test.csv` | Real background-noise clips (DEMAND, 17 environments) to mix into voice clips in Stage 3; **each environment split by time**, first ~70% train / last ~30% test, so every environment is in both and no audio is shared |
 | `motion_segments.csv` | Labelled activity segments with a `moving` flag (walking vs sitting / standing) |
 
 A summary of what was downloaded (revisions, counts, seed) is written to `data/MANIFEST.json`.
 
-- **Download time:** LFW and the scene dataset are ~10,000 small files each. Anonymous Hugging Face downloads are rate-limited (about 1 hour each), so log in once with `hf auth login` (free read token) on the server. Interrupted downloads resume when the script is re-run.
+- **Download time:** LFW is ~13,000 small files. Anonymous Hugging Face downloads are rate-limited (about 1 hour for LFW), so log in once with `hf auth login` (free read token) on the server. Interrupted downloads resume when the script is re-run.
 - **Testing without data:** `tests/test_prepare_data.py` runs every builder on tiny fake datasets that mimic the real file layouts.
 
 ### Server run results (2026-11-17)
@@ -136,10 +136,13 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
 | Face (LFW) | 6,000 test pairs, 0 missing images | ✅ Exactly the official benchmark |
 | Voice (mini VoxCeleb) | 30 speakers, 900 clips → 20 train / 10 test speakers; 17,400 train / 8,700 test pairs | ✅ 435 same-speaker pairs per speaker (30 clips), plus as many different-speaker pairs |
 | Keystroke (Aalto) | 77,873 train / 77,874 test participants available, **0 shared**; capped to 10,000 / 2,000 → 100,000 / 20,000 pairs | ✅ Person-disjoint splits |
-| Scenes (TAU) | Only **10,000 of the listed clips are in the Hugging Face copy** (1,894 of the 6,980 train-list clips, 8,106 of the test list), leaving a tiny train set and a large test set | ⚠️ Fixed: clips are now pooled and re-split by recording location (re-run with `--only scenes --skip-download`) |
+| Scenes (TAU) | Only **10,000 of the listed clips are in the Hugging Face copy**, and they cover **only 4 of the 10 scenes** (bus 3,670, airport 3,660, metro 2,470, metro station 200): the uploader kept the first 10,000 files alphabetically | ❌ **Replaced with DEMAND** (see below) |
 | Motion (HAR) | 79 labelled segments, 8 users, 12 experiments, 47 moving | ✅ Small, but enough for moving vs still |
 
-**Why split scenes by location:** file names such as `airport-barcelona-203-…` contain a recording-location ID. Keeping each location entirely in train or test stops a classifier from passing the test just by recognizing a place it already heard. The split is done per scene, so every scene appears in both train and test.
+**Why TAU was replaced:** a re-split by recording location confirmed only 4 scenes (all transport / indoor), with no park, street, café or home noise. The paper's condition is the **noise level**, not the type of place, so the project now:
+- **measures noise level directly in dB** from the microphone, like lux from the light sensor (no model needed);
+- uses **DEMAND** as real background noise to mix into voice clips for the Stage 3 degradation curves;
+- treats a scene classifier as an **optional extra** (the complete 10-scene TUT 2018 dataset, 15 GB, could be added later on the server).
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
 ### Planned stages
@@ -149,11 +152,12 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
   - [x] Write the download + pair-building script ([scripts/prepare_data.py](scripts/prepare_data.py)), tested on fake data
   - [x] Set up the server (Python 3.12 via `uv`, `hf auth login`) and run `prepare_data.py` there
   - [x] Check the generated pairs and `data/MANIFEST.json` on the server
-  - [ ] Re-run the scenes split on the server after pulling the location-split fix (`--only scenes --skip-download`)
+  - [x] Found that the TAU copy has only 4 of 10 scenes; replaced it with DEMAND
+  - [ ] Download DEMAND on the server (`--only noise`) and delete the unused TAU files (`data/raw/scenes`, `data/pairs/scenes_*.csv`)
   - [ ] Request access to the gated datasets (full VoxCeleb), only if needed later
 - [ ] **Stage 2: Per-factor verifiers.** Use pretrained embedding models (e.g. a face-embedding model for faces, SpeechBrain ECAPA for speaker verification) and train a small classifier for keystroke dynamics. Measure real **EER, FAR and FRR** for each factor.
-- [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with café or street noise at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
-- [ ] **Stage 4: Context models.** Train or evaluate an acoustic-scene classifier (environment and noise) and a human-activity classifier (walking vs still). Light comes directly from the device's light sensor, so no model is needed.
+- [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
+- [ ] **Stage 4: Context sensing.** Train a human-activity classifier (walking vs still) on the motion data. Light (lux) and noise level (dB) are measured directly from the device's sensors, so no model is needed for them. A scene classifier is optional.
 - [ ] **Stage 5: Learned trust function.** Convert measured accuracy into trust values per factor and per context, replacing the hard-coded Table II.
 - [ ] **Stage 6: Adaptive selector.** Plug the learned trust function into the selector from Step 1 (same two objectives). Later: try a contextual-bandit model that learns from login outcomes.
 - [ ] **Stage 7: Evaluation.** Compare adaptive, static and random selection using measured trust and failure rates, and compare against the paper's results.
@@ -170,7 +174,8 @@ Full generated report: [results/dataset_inspection.md](results/dataset_inspectio
 | Keystroke dynamics | [`onepunchdimash/aalto_keystroke_features_normalized`](https://huggingface.co/datasets/onepunchdimash/aalto_keystroke_features_normalized) | 781 MB | One row per typed sentence: `participant_id`, key codes and four timing features per key (`hl`, `il`, `pl`, `rl`: hold and between-key latencies); about 15 sentences per participant; train / test splits | ✅ **Use.** Can build same/different-participant pairs |
 | Keystroke dynamics (large) | [`rokset3/keystrokes136M_normalized_features`](https://huggingface.co/datasets/rokset3/keystrokes136M_normalized_features) | 781 MB | Not visible without access; same size as the Aalto dataset above, so possibly the same data | 🔒 **Gated, probably not needed** |
 | Mouse dynamics | [`dishamodi/mouse-dynamics`](https://huggingface.co/datasets/dishamodi/mouse-dynamics) | 277 MB | 3,571 PNG images of mouse paths labeled only **bot** (2,616) or **human** (955); no user IDs | ❌ **Not usable for verification.** It detects bots, not users. MIT licence |
-| Noise / environment | [`quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5`](https://huggingface.co/datasets/quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5) | 1.2 GB | ~10,000 `.wav` clips; labels in tab-separated files under `evaluation_setup/` (6,980 labeled training clips). 10 scenes: airport, bus, metro, metro station, park, public square, shopping mall, street (pedestrian), street (traffic), tram | ✅ **Use** for the noise classifier and as **real background noise** to mix into voice clips. Non-commercial research use only. No "café" class |
+| Background noise | [`SPARCO-project/benchmark_DEMAND_noise`](https://huggingface.co/datasets/SPARCO-project/benchmark_DEMAND_noise) | 0.15 GB | 1,275 four-second clips (16 kHz, mono) from the DEMAND database: 75 per environment, 17 environments: kitchen, living room, laundry, sports field, park, river, hallway, meeting room, office, **cafeteria**, restaurant, train station, public square, traffic, bus, car, metro | ✅ **Use** as real background noise to mix into voice clips (Stage 3). Licence CC BY 4.0 or CC BY-SA 3.0, depending on the listing (see DEMAND on Zenodo) |
+| ~~Noise / environment~~ | [`quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5`](https://huggingface.co/datasets/quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5) | 1.2 GB | Label lists name 10 scenes, but the audio covers **only 4** (airport, bus, metro, metro station) | ❌ **Replaced by DEMAND** |
 | Motion | [`DiFronzo/Human_Activity_Recognition`](https://huggingface.co/datasets/DiFronzo/Human_Activity_Recognition) | 7 MB | `raw_data.zip`: accelerometer + gyroscope at 50 Hz from a Samsung Galaxy S8 in a pocket; the zip contains 8 users / 12 experiments (the README mentions 16 volunteers), with a labels file; 5 activities: walking, walking upstairs, walking downstairs, sitting, standing | ✅ **Use** for a moving-vs-still classifier. Needs unzipping and parsing the labels file |
 
 ### Known gaps

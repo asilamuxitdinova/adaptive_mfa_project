@@ -30,7 +30,7 @@ DATASETS = {
     "onepunchdimash/aalto_keystroke_features_normalized": "Keystroke dynamics",
     "rokset3/keystrokes136M_normalized_features": "Keystroke dynamics (large)",
     "dishamodi/mouse-dynamics": "Mouse dynamics",
-    "quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5": "Noise / environment",
+    "SPARCO-project/benchmark_DEMAND_noise": "Background noise (DEMAND)",
     "DiFronzo/Human_Activity_Recognition": "Motion",
 }
 
