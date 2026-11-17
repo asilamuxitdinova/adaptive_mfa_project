@@ -1,0 +1,15 @@
+# Stage 1: dataset inspection and shared metrics
+datasets>=3.0
+huggingface_hub>=0.25
+numpy>=1.26
+pytest>=8.0
+pillow>=10.0      # decode image samples
+soundfile>=0.12   # decode audio samples
+
+# Stages 2-4: verifiers, degradation and context models (install when starting Stage 2)
+scikit-learn>=1.5
+matplotlib>=3.8
+torch>=2.5
+torchaudio>=2.5
+facenet-pytorch>=2.6
+speechbrain>=1.0

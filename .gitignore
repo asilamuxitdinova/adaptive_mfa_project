@@ -1,1 +1,17 @@
+# Papers (copyrighted; cite via DOI instead)
 *.pdf
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded datasets and model weights (too large for GitHub)
+data/*
+!data/.gitkeep
+models/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
