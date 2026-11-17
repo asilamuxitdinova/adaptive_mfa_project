@@ -11,5 +11,5 @@ scikit-learn>=1.5
 matplotlib>=3.8
 torch>=2.5
 torchaudio>=2.5
-facenet-pytorch>=2.6
 speechbrain>=1.0
+# face model library chosen in Stage 2 (facenet-pytorch removed: it requires torch<2.3)
