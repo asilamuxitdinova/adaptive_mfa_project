@@ -11,7 +11,7 @@ Tracks the progress of turning the adaptive MFA approach from the paper below in
 | Step | Description | Status |
 |---|---|---|
 | 1 | Simulation demo of the paper's adaptive selection approach | ✅ Done |
-| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: project set up, datasets inspected (Stage 1) |
+| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: project set up, datasets inspected, data preparation script ready (Stage 1) |
 
 ---
 
@@ -76,35 +76,66 @@ adaptive_mfa_project/
 ├── adaptive_mfa_demo.py        # Step 1 simulation
 ├── PROGRESS.md
 ├── requirements.txt            # Stage 1 libraries + Stage 2-4 libraries
-├── data/                       # downloaded datasets (gitignored)
+├── data/                       # created by prepare_data.py on the server (gitignored)
 ├── src/
 │   ├── metrics.py              # shared EER / FAR / FRR calculation
+│   ├── pairs.py                # same-person / different-person pair building
 │   └── verifiers/              # face, voice, keystroke verifiers (Stage 2)
 ├── scripts/
-│   └── inspect_datasets.py     # Stage 1 dataset inspection
+│   ├── inspect_datasets.py     # Stage 1 dataset inspection
+│   └── prepare_data.py         # Stage 1 download + pair building
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/
-    └── test_metrics.py         # 7 tests, all passing
+└── tests/                      # 19 tests, all passing
+    ├── test_metrics.py
+    ├── test_pairs.py
+    └── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
 ```
 
 **Set up and run:**
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install datasets huggingface_hub numpy pytest pillow soundfile   # Stage 1 part of requirements.txt
-python -m pytest -q tests                                          # metric tests
+python -m pytest -q tests                                          # all tests (no downloads needed)
 python scripts/inspect_datasets.py                                 # writes results/dataset_inspection.md
 ```
 
 - **`src/metrics.py`:** computes EER, FAR and FRR from verifier scores (1 = same person, 0 = different person). Every factor will use it, so results are comparable. Tested against known cases, including the theoretical EER of two overlapping normal distributions (15.87%).
+- **`src/pairs.py`:** builds balanced genuine / impostor pairs and splits people into disjoint train / test sets, with a fixed random seed for reproducibility.
+
+### Data preparation (`scripts/prepare_data.py`)
+
+**Datasets are never stored in git or on the development laptop.** They are downloaded on the server by one script, at pinned dataset versions, so every run uses identical data.
+
+```bash
+# on the server, from the project root (set HF_HOME to a large disk first)
+python scripts/prepare_data.py --dry-run           # list datasets and sizes (~2.4 GB total)
+python scripts/prepare_data.py                     # download everything and build pairs
+python scripts/prepare_data.py --only face voice   # or just some datasets
+```
+
+| Output (in `data/pairs/`) | Contents |
+|---|---|
+| `face_test.csv` | LFW's official 6,000 pairs in 10 folds (standard benchmark) |
+| `voice_train.csv`, `voice_test.csv` | Same / different speaker clip pairs; **speakers re-split** 20 train / 10 test, because the repo's own splits share all 30 speakers |
+| `keystroke_train.csv`, `keystroke_test.csv` | Same / different participant sentence pairs; **no participant in both** (default caps: 10,000 train and 2,000 test participants, 5 genuine pairs each) |
+| `scenes_train.csv`, `scenes_test.csv` | Acoustic scene labels for the noise / environment classifier |
+| `motion_segments.csv` | Labelled activity segments with a `moving` flag (walking vs sitting / standing) |
+
+A summary of what was downloaded (revisions, counts, seed) is written to `data/MANIFEST.json`.
+
+- **Download time:** LFW and the scene dataset are ~10,000 small files each. Anonymous Hugging Face downloads are rate-limited (about 1 hour each), so log in once with `hf auth login` (free read token) on the server. Interrupted downloads resume when the script is re-run.
+- **Testing without data:** `tests/test_prepare_data.py` runs every builder on tiny fake datasets that mimic the real file layouts.
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
 ### Planned stages
 
 - [ ] **Stage 1: Dataset preparation.** *(in progress)*
   - [x] Inspect the candidate datasets and their licences ([results/dataset_inspection.md](results/dataset_inspection.md))
-  - [ ] Request access to the gated datasets (Hugging Face login + accept terms), if needed
-  - [ ] Download the chosen datasets and build verification pairs (same person / different person)
+  - [x] Write the download + pair-building script ([scripts/prepare_data.py](scripts/prepare_data.py)), tested on fake data
+  - [ ] Set up the server (Python 3.11/3.12, `HF_HOME`, `hf auth login`) and run `prepare_data.py` there
+  - [ ] Check the generated pairs and `data/MANIFEST.json` on the server
+  - [ ] Request access to the gated datasets (full VoxCeleb), only if needed later
 - [ ] **Stage 2: Per-factor verifiers.** Use pretrained embedding models (e.g. a face-embedding model for faces, SpeechBrain ECAPA for speaker verification) and train a small classifier for keystroke dynamics. Measure real **EER, FAR and FRR** for each factor.
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with café or street noise at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
 - [ ] **Stage 4: Context models.** Train or evaluate an acoustic-scene classifier (environment and noise) and a human-activity classifier (walking vs still). Light comes directly from the device's light sensor, so no model is needed.
@@ -119,17 +150,18 @@ Full generated report: [results/dataset_inspection.md](results/dataset_inspectio
 | Purpose | Dataset | Size | What's inside | Verdict |
 |---|---|---|---|---|
 | Face verification | [`marcelohaps/lfw`](https://huggingface.co/datasets/marcelohaps/lfw) | 182 MB | 13,233 face images (250×250) of 5,749 people; 1,680 people have 2+ images. Includes the official `pairs.csv` (6,000 same/different pairs in 10 folds) | ✅ **Use.** Ready-made verification pairs |
-| Voice verification | [`s3prl/mini_voxceleb1`](https://huggingface.co/datasets/s3prl/mini_voxceleb1) | 228 MB | 900 `.wav` clips from 30 speakers, split into train / valid / test (300 each); the speaker ID is in the file name (`id10012-...`) | ✅ **Use.** Small enough for a laptop. Decoding audio with `datasets` needs `torchcodec` (installed with PyTorch in Stage 2) |
+| Voice verification | [`s3prl/mini_voxceleb1`](https://huggingface.co/datasets/s3prl/mini_voxceleb1) | 228 MB | 900 `.wav` clips from 30 speakers (30 clips each), split into train / valid / test (300 each) **but all three splits contain the same 30 speakers**; the speaker ID is in the file name (`id10012-...`) | ✅ **Use.** Small enough for a laptop. Decoding audio with `datasets` needs `torchcodec` (installed with PyTorch in Stage 2) |
 | Voice verification (full) | [`ProgramComputer/voxceleb`](https://huggingface.co/datasets/ProgramComputer/voxceleb) | 716 GB | VoxCeleb1 + VoxCeleb2 as zip archives | 🔒 **Gated, optional.** Needs Hugging Face login and accepting terms; only worth it on the GPU server with enough disk space |
 | Keystroke dynamics | [`onepunchdimash/aalto_keystroke_features_normalized`](https://huggingface.co/datasets/onepunchdimash/aalto_keystroke_features_normalized) | 781 MB | One row per typed sentence: `participant_id`, key codes and four timing features per key (`hl`, `il`, `pl`, `rl`: hold and between-key latencies); about 15 sentences per participant; train / test splits | ✅ **Use.** Can build same/different-participant pairs |
 | Keystroke dynamics (large) | [`rokset3/keystrokes136M_normalized_features`](https://huggingface.co/datasets/rokset3/keystrokes136M_normalized_features) | 781 MB | Not visible without access; same size as the Aalto dataset above, so possibly the same data | 🔒 **Gated, probably not needed** |
 | Mouse dynamics | [`dishamodi/mouse-dynamics`](https://huggingface.co/datasets/dishamodi/mouse-dynamics) | 277 MB | 3,571 PNG images of mouse paths labeled only **bot** (2,616) or **human** (955); no user IDs | ❌ **Not usable for verification.** It detects bots, not users. MIT licence |
 | Noise / environment | [`quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5`](https://huggingface.co/datasets/quinnlue/tau-urban-acoustic-scenes-2022-mobile-split5) | 1.2 GB | ~10,000 `.wav` clips; labels in tab-separated files under `evaluation_setup/` (6,980 labeled training clips). 10 scenes: airport, bus, metro, metro station, park, public square, shopping mall, street (pedestrian), street (traffic), tram | ✅ **Use** for the noise classifier and as **real background noise** to mix into voice clips. Non-commercial research use only. No "café" class |
-| Motion | [`DiFronzo/Human_Activity_Recognition`](https://huggingface.co/datasets/DiFronzo/Human_Activity_Recognition) | 7 MB | `raw_data.zip`: accelerometer + gyroscope at 50 Hz from 16 volunteers (Samsung Galaxy S8 in a pocket), with a labels file; 5 activities: walking, walking upstairs, walking downstairs, sitting, standing | ✅ **Use** for a moving-vs-still classifier. Needs unzipping and parsing the labels file |
+| Motion | [`DiFronzo/Human_Activity_Recognition`](https://huggingface.co/datasets/DiFronzo/Human_Activity_Recognition) | 7 MB | `raw_data.zip`: accelerometer + gyroscope at 50 Hz from a Samsung Galaxy S8 in a pocket; the zip contains 8 users / 12 experiments (the README mentions 16 volunteers), with a labels file; 5 activities: walking, walking upstairs, walking downstairs, sitting, standing | ✅ **Use** for a moving-vs-still classifier. Needs unzipping and parsing the labels file |
 
 ### Known gaps
 - **Fingerprint, iris and hand biometrics:** no real public datasets on Hugging Face (they are privacy-restricted and usually need signed licence agreements). The "iris" dataset on Hugging Face is the flower dataset. These factors will stay simulated with the paper's values.
 - **Device and network effects:** no public dataset records the same users logging in on different devices and networks. These effects will stay simulated unless we collect our own data.
 - **Licences:** LFW and VoxCeleb are for research use only, which suits a university project but not a commercial product.
+- **Voice evaluation may be optimistic:** mini VoxCeleb's speakers (IDs like `id10012`) come from the VoxCeleb1 *development* set, which popular pretrained speaker models (e.g. SpeechBrain ECAPA) were trained on. The standard unseen-speaker test set is VoxCeleb1-O (speakers `id10270`–`id10309`), available in the gated full VoxCeleb dataset.
 - **Mouse dynamics:** the only mouse dataset found is for bot detection, so mouse dynamics will stay simulated unless a per-user dataset is found.
 - **Compute:** the minimal version runs on a laptop CPU; full VoxCeleb, degradation sweeps and fine-tuning will run on the L4 GPU server.
