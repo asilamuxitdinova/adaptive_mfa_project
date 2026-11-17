@@ -15,7 +15,7 @@ Outputs (paths in the CSVs are relative to the project root):
     data/pairs/face_test.csv          LFW official 6,000 pairs (10 folds)
     data/pairs/voice_{train,test}.csv speaker pairs, speaker-disjoint train/test
     data/pairs/keystroke_{train,test}.csv sentence pairs, participant-disjoint train/test
-    data/pairs/scenes_{train,test}.csv acoustic scene labels (noise / environment)
+    data/pairs/scenes_{train,test}.csv acoustic scene labels, location-disjoint train/test
     data/pairs/motion_segments.csv     labelled activity segments (moving vs still)
     data/MANIFEST.json                 what was downloaded, revisions and counts
 
@@ -175,20 +175,45 @@ def build_keystroke(raw: Path, rng, args):
     return stats
 
 
+def scene_location(filename: str) -> str:
+    """'audio/airport-barcelona-203-6129-0-a.wav' -> 'airport-barcelona-203' (one recording location)."""
+    return "-".join(Path(filename).stem.split("-")[:3])
+
+
 def build_scenes(raw: Path, rng, args):
-    """Scene labels from the tab-separated DCASE lists; keep only clips that were downloaded."""
-    stats = {}
-    for split, listing in (("train", "fold1_train.csv"), ("test", "fold1_evaluate.csv")):
-        rows, missing = [], 0
+    """
+    Scene labels from the tab-separated DCASE lists. The Hugging Face copy contains only
+    10,000 of the listed clips (1,894 of the train list, 8,106 of the test list), so the
+    downloaded clips are pooled and re-split, keeping every recording location entirely
+    in train or in test, separately for each scene so all scenes appear in both.
+    """
+    labels, missing = {}, 0
+    for listing in ("fold1_train.csv", "fold1_evaluate.csv"):
         with (raw / "evaluation_setup" / listing).open(encoding="utf-8") as f:
             for r in csv.DictReader(f, delimiter="\t"):
-                path = raw / r["filename"]
-                if path.exists():
-                    rows.append((rel(path), r["scene_label"]))
+                if (raw / r["filename"]).exists():
+                    labels[r["filename"]] = r["scene_label"]
                 else:
                     missing += 1
-        stats[f"scenes_{split}_clips"] = write_csv(PAIRS / f"scenes_{split}.csv", ["path", "scene"], rows)
-        stats[f"scenes_{split}_listed_but_not_in_repo"] = missing
+
+    by_scene = {}
+    for filename, scene in labels.items():
+        by_scene.setdefault(scene, {}).setdefault(scene_location(filename), []).append(filename)
+
+    split = {"train": [], "test": []}
+    for scene in sorted(by_scene):
+        locations = by_scene[scene]
+        if len(locations) < 2:          # cannot hold out a location; keep it for training
+            train_locs, test_locs = sorted(locations), []
+        else:
+            train_locs, test_locs = split_ids(locations, args.scenes_test_fraction, rng)
+        for name, locs in (("train", train_locs), ("test", test_locs)):
+            split[name] += [(rel(raw / f), scene, loc) for loc in locs for f in sorted(locations[loc])]
+
+    stats = {"scenes_clips_downloaded": len(labels), "scenes_listed_but_not_in_repo": missing,
+             "scenes_classes": len(by_scene), "scenes_locations": sum(map(len, by_scene.values()))}
+    for name, rows in split.items():
+        stats[f"scenes_{name}_clips"] = write_csv(PAIRS / f"scenes_{name}.csv", ["path", "scene", "location"], rows)
     return stats
 
 
@@ -232,6 +257,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="random seed for splits and pairs (default 42)")
     parser.add_argument("--test-fraction", type=float, default=1 / 3,
                         help="fraction of people held out for testing (voice, keystroke if re-split; default 1/3)")
+    parser.add_argument("--scenes-test-fraction", type=float, default=0.3,
+                        help="fraction of recording locations per scene held out for testing (default 0.3)")
     parser.add_argument("--keystroke-train-users", type=int, default=10_000, help="max participants for training pairs (0 = all)")
     parser.add_argument("--keystroke-test-users", type=int, default=2_000, help="max participants for test pairs (0 = all)")
     parser.add_argument("--keystroke-pairs-per-user", type=int, default=5, help="genuine pairs per participant")

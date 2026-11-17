@@ -11,7 +11,7 @@ Tracks the progress of turning the adaptive MFA approach from the paper below in
 | Step | Description | Status |
 |---|---|---|
 | 1 | Simulation demo of the paper's adaptive selection approach | ✅ Done |
-| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: project set up, datasets inspected, data preparation script ready (Stage 1) |
+| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 (data preparation) done on the GPU server; Stage 2 next |
 
 ---
 
@@ -86,7 +86,7 @@ adaptive_mfa_project/
 │   └── prepare_data.py         # Stage 1 download + pair building
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 19 tests, all passing
+└── tests/                      # 20 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
     └── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
@@ -119,22 +119,37 @@ python scripts/prepare_data.py --only face voice   # or just some datasets
 | `face_test.csv` | LFW's official 6,000 pairs in 10 folds (standard benchmark) |
 | `voice_train.csv`, `voice_test.csv` | Same / different speaker clip pairs; **speakers re-split** 20 train / 10 test, because the repo's own splits share all 30 speakers |
 | `keystroke_train.csv`, `keystroke_test.csv` | Same / different participant sentence pairs; **no participant in both** (default caps: 10,000 train and 2,000 test participants, 5 genuine pairs each) |
-| `scenes_train.csv`, `scenes_test.csv` | Acoustic scene labels for the noise / environment classifier |
+| `scenes_train.csv`, `scenes_test.csv` | Acoustic scene labels for the noise / environment classifier; the 10,000 downloaded clips are **pooled and re-split ~70 / 30 by recording location**, per scene (see below) |
 | `motion_segments.csv` | Labelled activity segments with a `moving` flag (walking vs sitting / standing) |
 
 A summary of what was downloaded (revisions, counts, seed) is written to `data/MANIFEST.json`.
 
 - **Download time:** LFW and the scene dataset are ~10,000 small files each. Anonymous Hugging Face downloads are rate-limited (about 1 hour each), so log in once with `hf auth login` (free read token) on the server. Interrupted downloads resume when the script is re-run.
 - **Testing without data:** `tests/test_prepare_data.py` runs every builder on tiny fake datasets that mimic the real file layouts.
+
+### Server run results (2026-11-17)
+
+Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4) after `hf auth login`; all 5 datasets downloaded and processed without errors. From `data/MANIFEST.json`:
+
+| Dataset | Result | Check |
+|---|---|---|
+| Face (LFW) | 6,000 test pairs, 0 missing images | ✅ Exactly the official benchmark |
+| Voice (mini VoxCeleb) | 30 speakers, 900 clips → 20 train / 10 test speakers; 17,400 train / 8,700 test pairs | ✅ 435 same-speaker pairs per speaker (30 clips), plus as many different-speaker pairs |
+| Keystroke (Aalto) | 77,873 train / 77,874 test participants available, **0 shared**; capped to 10,000 / 2,000 → 100,000 / 20,000 pairs | ✅ Person-disjoint splits |
+| Scenes (TAU) | Only **10,000 of the listed clips are in the Hugging Face copy** (1,894 of the 6,980 train-list clips, 8,106 of the test list), leaving a tiny train set and a large test set | ⚠️ Fixed: clips are now pooled and re-split by recording location (re-run with `--only scenes --skip-download`) |
+| Motion (HAR) | 79 labelled segments, 8 users, 12 experiments, 47 moving | ✅ Small, but enough for moving vs still |
+
+**Why split scenes by location:** file names such as `airport-barcelona-203-…` contain a recording-location ID. Keeping each location entirely in train or test stops a classifier from passing the test just by recognizing a place it already heard. The split is done per scene, so every scene appears in both train and test.
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
 ### Planned stages
 
-- [ ] **Stage 1: Dataset preparation.** *(in progress)*
+- [x] **Stage 1: Dataset preparation.**
   - [x] Inspect the candidate datasets and their licences ([results/dataset_inspection.md](results/dataset_inspection.md))
   - [x] Write the download + pair-building script ([scripts/prepare_data.py](scripts/prepare_data.py)), tested on fake data
-  - [ ] Set up the server (Python 3.11/3.12, `HF_HOME`, `hf auth login`) and run `prepare_data.py` there
-  - [ ] Check the generated pairs and `data/MANIFEST.json` on the server
+  - [x] Set up the server (Python 3.12 via `uv`, `hf auth login`) and run `prepare_data.py` there
+  - [x] Check the generated pairs and `data/MANIFEST.json` on the server
+  - [ ] Re-run the scenes split on the server after pulling the location-split fix (`--only scenes --skip-download`)
   - [ ] Request access to the gated datasets (full VoxCeleb), only if needed later
 - [ ] **Stage 2: Per-factor verifiers.** Use pretrained embedding models (e.g. a face-embedding model for faces, SpeechBrain ECAPA for speaker verification) and train a small classifier for keystroke dynamics. Measure real **EER, FAR and FRR** for each factor.
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with café or street noise at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.

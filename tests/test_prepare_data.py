@@ -30,7 +30,7 @@ def prep(tmp_path, monkeypatch):
 
 @pytest.fixture
 def args():
-    return argparse.Namespace(test_fraction=1 / 3, keystroke_train_users=0,
+    return argparse.Namespace(test_fraction=1 / 3, scenes_test_fraction=0.3, keystroke_train_users=0,
                               keystroke_test_users=0, keystroke_pairs_per_user=5)
 
 
@@ -117,17 +117,31 @@ def test_keystroke_resplits_when_repo_splits_overlap(prep, args, tmp_path):
     assert not ids(train) & ids(test)
 
 
-def test_scenes_reads_tab_separated_lists_and_skips_missing_audio(prep, args, tmp_path):
+def test_scene_location_from_filename(prep):
+    assert prep.scene_location("audio/airport-barcelona-203-6129-0-a.wav") == "airport-barcelona-203"
+
+
+def test_scenes_pools_lists_and_splits_by_location(prep, args, tmp_path):
     raw = tmp_path / "data/raw/scenes"
-    touch(raw / "audio/a.wav")
-    touch(raw / "audio/b.wav")
-    touch(raw / "evaluation_setup/fold1_train.csv", b"filename\tscene_label\naudio/a.wav\tmetro\naudio/x.wav\tpark\n")
-    touch(raw / "evaluation_setup/fold1_evaluate.csv", b"filename\tscene_label\naudio/b.wav\tbus\n")
+    train_list, eval_list = ["filename\tscene_label"], ["filename\tscene_label"]
+    for scene in ("metro", "park"):
+        for loc in range(10):                      # 10 locations x 3 clips per scene
+            for seg in range(3):
+                name = f"audio/{scene}-lyon-{loc}-{seg}-0-a.wav"
+                touch(raw / name)
+                (train_list if loc < 3 else eval_list).append(f"{name}\t{scene}")
+    train_list.append("audio/park-lyon-99-0-0-a.wav\tpark")    # listed but not downloaded
+    touch(raw / "evaluation_setup/fold1_train.csv", "\n".join(train_list).encode())
+    touch(raw / "evaluation_setup/fold1_evaluate.csv", "\n".join(eval_list).encode())
 
     stats = prep.build_scenes(raw, random.Random(0), args)
 
-    assert stats["scenes_train_clips"] == 1 and stats["scenes_train_listed_but_not_in_repo"] == 1
-    assert read(tmp_path / "data/pairs/scenes_test.csv") == [{"path": "data/raw/scenes/audio/b.wav", "scene": "bus"}]
+    train = read(tmp_path / "data/pairs/scenes_train.csv")
+    test = read(tmp_path / "data/pairs/scenes_test.csv")
+    assert stats["scenes_clips_downloaded"] == 60 and stats["scenes_listed_but_not_in_repo"] == 1
+    assert len(train) == 42 and len(test) == 18                # 7 / 3 locations per scene
+    assert not {r["location"] for r in train} & {r["location"] for r in test}
+    assert {r["scene"] for r in train} == {r["scene"] for r in test} == {"metro", "park"}
 
 
 def test_motion_unzips_without_macos_junk_and_marks_moving(prep, args, tmp_path):
