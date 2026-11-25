@@ -11,5 +11,10 @@ scikit-learn>=1.5
 matplotlib>=3.8
 torch>=2.5
 torchaudio>=2.5
+torchvision>=0.20   # face detection (MTCNN) helpers
+requests>=2.0      # facenet-pytorch weight download
+tqdm>=4.0
 speechbrain>=1.0
-# face model library chosen in Stage 2 (facenet-pytorch removed: it requires torch<2.3)
+# Face model: facenet-pytorch pins torch<2.3 and numpy<2 in its metadata, but its code works with
+# current versions, so install it separately WITHOUT its pinned dependencies:
+#     pip install --no-deps facenet-pytorch==2.6.0     (or: uv pip install --no-deps ...)

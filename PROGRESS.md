@@ -82,21 +82,24 @@ adaptive_mfa_project/
 │   ├── pairs.py                # same-person / different-person pair building
 │   ├── keystroke_data.py       # Aalto sentences -> padded key-timing sequences
 │   └── verifiers/
-│       └── keystroke.py        # baseline + TypeNet-style LSTM verifier (Stage 2)
+│       ├── keystroke.py        # baseline + TypeNet-style LSTM verifier (Stage 2)
+│       └── face.py             # pixel baseline + pretrained FaceNet verifier (Stage 2)
 ├── scripts/
 │   ├── inspect_datasets.py     # Stage 1 dataset inspection
 │   ├── prepare_data.py         # Stage 1 download + pair building
 │   ├── train_keystroke.py      # Stage 2 keystroke training
 │   ├── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR (one sentence vs one sentence)
 │   ├── evaluate_keystroke_enrolment.py  # Stage 2 keystroke EER with 1-10 enrolment sentences
+│   ├── evaluate_face.py        # Stage 2 face EER / FAR / FRR on LFW
 │   └── summarize_gpu_log.py    # GPU usage summary from an nvidia-smi log
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 36 tests, all passing
+└── tests/                      # 40 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
     ├── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
-    └── test_keystroke.py       # keystroke pipeline on synthetic typists
+    ├── test_keystroke.py       # keystroke pipeline on synthetic typists
+    └── test_face.py            # face pipeline on synthetic images (no weights needed)
 ```
 
 **Set up and run:**
@@ -284,6 +287,27 @@ python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_en
 
 **Options:** `train_keystroke.py --all-participants` trains on all ~78,000 training participants (TypeNet used ~68,000) without rebuilding the pair files, so the test set stays the same.
 
+### Stage 2: Face verifier (pretrained, evaluation only; ready, not yet run on the server)
+
+**Approach:** no training. A well-known pretrained model is measured on LFW's official benchmark.
+- **MTCNN** finds and aligns the face in each photo (160×160 crop). If no face is found, the central part of the photo is used and the photo is counted as a **detection failure**. Detection failures will matter in Stage 3, where dark or blurred photos make detection fail.
+- **FaceNet** (Schroff et al., 2015): an Inception-ResNet-v1 **pretrained on VGGFace2** (Cao et al., 2018), PyTorch port `facenet-pytorch`. It maps each face to a 512-number embedding; two photos are compared by cosine similarity.
+- **Baseline (no learning):** the aligned face shrunk to 32×32 grey pixels, compared by cosine similarity, to show what the pretrained model adds.
+- **Test set:** LFW's official 6,000 pairs (3,000 same person, 3,000 different people, 10 folds).
+- **Reported:**
+  - EER, FAR and FRR, like keystroke.
+  - The **standard LFW accuracy** (10-fold: threshold chosen on 9 folds, tested on the 10th), to check against published results.
+  - FRR at the paper's FAR of 1%, and FAR at its FRR of 20%.
+  - The face detection rate.
+- **Paper's Table I face values:** lip EER 5.2–6.8%, texture ~10%, brow/cheek ~15%; whole face modality FAR 1% and FRR 20%.
+- **Caveat:** VGGFace2 is made of celebrity photos, so some LFW people may be in FaceNet's training data. Published LFW results share this limitation.
+- **Install note:** `facenet-pytorch` pins very old versions (torch < 2.3, numpy < 2), but its code works with current ones, so it is installed with `--no-deps`. Tested on the laptop with torch 2.15 and numpy 2. The weights (~110 MB) download on the first run, into `~/.cache/torch/checkpoints` on the server.
+
+```bash
+uv pip install torchvision requests tqdm && uv pip install --no-deps facenet-pytorch==2.6.0
+python scripts/evaluate_face.py                 # writes results/face_results.{md,json} and face_scores.png
+```
+
 ### Planned stages
 
 - [x] **Stage 1: Dataset preparation.**
@@ -300,7 +324,7 @@ python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_en
   - [x] Train the keystroke model on the server and evaluate it on the test participants: **EER 4.69%** (run 3; run 2: 9.94%, run 1: 22.07%), baseline 26.52%
   - [x] Keystroke: more epochs + all ~78,000 participants (run 3)
   - [x] Keystroke enrolment evaluation: **EER 2.49% with 10 enrolment sentences** (2.79% with 5, 5.12% with 1)
-  - [ ] Face verifier on LFW (pretrained model, evaluation only)
+  - [ ] Face verifier on LFW (pretrained FaceNet, evaluation only): code ready and tested, run on the server
   - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
 - [ ] **Stage 4: Context sensing.** Train a human-activity classifier (walking vs still) on the motion data. Light (lux) and noise level (dB) are measured directly from the device's sensors, so no model is needed for them. A scene classifier is optional.
