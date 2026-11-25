@@ -4,9 +4,12 @@ Keystroke-dynamics verifiers: is this typed sentence from the same person as tha
 Two verifiers are compared:
   - Baseline (no training): summary statistics of each sentence's timings, compared by distance.
   - TypeNet-style LSTM (trained): a sequence model mapping a sentence to a 128-number
-    embedding, trained with triplet loss so the same person's sentences are close together.
+    embedding, trained so the same person's sentences are close together.
     Based on Acien et al., "TypeNet: Deep Learning Keystroke Biometrics" (IEEE T-BIOM, 2021),
-    which introduced this approach on the same Aalto dataset.
+    which introduced this approach on the same Aalto dataset. TypeNet uses triplet loss; the
+    default here is supervised contrastive loss (Khosla et al., NeurIPS 2020), because batch-hard
+    triplet loss can collapse towards identical embeddings (on the first real-data run its loss
+    stuck at the margin and all scores were squeezed into a tiny range).
 
 Scores follow src.metrics: higher = more likely the same person.
 """
@@ -67,6 +70,28 @@ def batch_hard_triplet_loss(embeddings, labels, margin: float = 0.2):
     hardest_pos = (dist * (same & ~eye)).max(dim=1).values
     hardest_neg = dist.masked_fill(same, float("inf")).min(dim=1).values
     return torch.relu(hardest_pos - hardest_neg + margin).mean()
+
+
+def supervised_contrastive_loss(embeddings, labels, temperature: float = 0.1):
+    """
+    Each sentence should be more similar to its own participant's other sentences than to
+    every other sentence in the batch (softmax over all similarities). Using all pairs, not
+    just the hardest one, makes training stable and resistant to collapse.
+    """
+    import torch
+
+    n = len(labels)
+    eye = torch.eye(n, dtype=torch.bool, device=labels.device)
+    sim = (embeddings @ embeddings.T / temperature).masked_fill(eye, float("-inf"))
+    log_prob = sim - torch.logsumexp(sim, dim=1, keepdim=True)
+    positives = (labels[:, None] == labels[None, :]) & ~eye
+    per_anchor = log_prob.masked_fill(~positives, 0.0).sum(dim=1) / positives.sum(dim=1).clamp(min=1)
+    return -per_anchor[positives.any(dim=1)].mean()
+
+
+def embedding_spread(embeddings: np.ndarray) -> float:
+    """Average per-dimension standard deviation; close to 0 means all embeddings are the same (collapse)."""
+    return float(embeddings.std(axis=0).mean()) if len(embeddings) else 0.0
 
 
 def embed(model, data: KeystrokeSet, device="cpu", batch_size: int = 2048) -> np.ndarray:

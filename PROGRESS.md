@@ -87,10 +87,11 @@ adaptive_mfa_project/
 │   ├── inspect_datasets.py     # Stage 1 dataset inspection
 │   ├── prepare_data.py         # Stage 1 download + pair building
 │   ├── train_keystroke.py      # Stage 2 keystroke training
-│   └── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR
+│   ├── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR
+│   └── summarize_gpu_log.py    # GPU usage summary from an nvidia-smi log
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 25 tests, all passing
+└── tests/                      # 32 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
     ├── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
@@ -154,7 +155,8 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
 
 **Approach**, following TypeNet (Acien et al., *IEEE T-BIOM* 2021), which introduced deep keystroke verification on this Aalto dataset:
 - Each typed sentence becomes a sequence of up to 50 keys; each key has its code and four timings: hold time (`hl`) and three gaps to the next key (`il`, `pl`, `rl`). Timings are standardized with training statistics only.
-- A 2-layer **LSTM** turns the sequence into a 128-number embedding (a "typing fingerprint"), trained with **batch-hard triplet loss**: each batch has 64 participants × 5 sentences, and the model learns to place one person's sentences closer together than anyone else's.
+- A 2-layer **LSTM** turns the sequence into a 128-number embedding (a "typing fingerprint"). Each batch has 64 participants × 5 sentences, and the model learns to place one person's sentences closer together than anyone else's.
+- **Loss:** **supervised contrastive loss** (Khosla et al., 2020) by default. The first real-data run used TypeNet's batch-hard triplet loss: its loss got stuck at the margin value (0.2003 vs margin 0.2) and the scores were squeezed into a tiny range (a near-collapse), so the default was switched to this more stable loss; triplet loss is still available with `--loss triplet`. The training log now records an **embedding spread** each epoch and warns if it drops towards 0 (collapse).
 - About 500 of the 10,000 training participants are held out for **validation**; the model with the best validation EER is kept, with early stopping.
 - A **baseline with no training** (mean / std / median of each timing, compared by distance) is evaluated alongside it, to show what training adds.
 - Testing uses `keystroke_test.csv`: **2,000 participants never seen in training**, 20,000 pairs of single sentences. Results are compared with the paper's Table I keystroke values (FAR 7%, FRR 0.1%, crossover 1.8%).
@@ -169,9 +171,22 @@ python scripts/evaluate_keystroke.py                             # EER / FAR / F
 | Output | Contents |
 |---|---|
 | `models/keystroke_typenet.pt` | Best model + settings (gitignored) |
-| `results/keystroke_training_log.csv` | Loss and validation EER per epoch |
+| `results/keystroke_training_log.csv` | Loss, validation EER and embedding spread per epoch |
 | `results/keystroke_results.md` / `.json` | Test EER / FAR / FRR, baseline vs trained model vs paper |
 | `results/keystroke_scores.png` | Genuine vs impostor score distributions |
+
+**Run 1 on real data (2026-11-25, batch-hard triplet loss):** 20,000 test pairs from 2,000 unseen participants.
+
+| Verifier | EER | FAR at EER | FRR at EER | FAR when FRR = 0.1% |
+|---|---|---|---|---|
+| Baseline (no training) | 26.52% | 26.52% | 26.52% | 99.81% |
+| TypeNet-style LSTM, triplet loss | 22.07% | 21.13% | 23.00% | 65.75% |
+| *Paper, Table I (from literature)* | *crossover 1.8%* | | | *FAR 7% at FRR 0.1%* |
+
+- Training helped only a little (26.5% → 22.1%). The training loss stayed at 0.2003, the triplet margin, for the last epochs and validation EER fluctuated between 21% and 25%: the near-collapse described above. Epochs took about 2 seconds each on the L4.
+- Each test pair compares **one sentence with one sentence**, the hardest setting; systems that compare a new sentence with a profile of several enrolled sentences report much lower errors.
+- At the paper's operating point (only 0.1% of real users rejected), 66% of impostors would be accepted, so the paper's FAR of 7% looks very optimistic for single sentences.
+- **Next:** retrain with supervised contrastive loss (run 2), then consider enrolment with several sentences per user and training on all ~78,000 participants.
 
 **Sanity check on synthetic data (laptop):** 80 fake typists with distinct rhythms, 30 unseen test typists → baseline EER 10%, trained model **4%**. This only shows the pipeline learns; synthetic typing is far easier than real typing.
 

@@ -29,7 +29,8 @@ import numpy as np  # noqa: E402
 from src.keystroke_data import DEFAULT_MAX_LEN, N_FEATURES, Standardizer, load_sequences, pk_batches  # noqa: E402
 from src.metrics import compute_eer  # noqa: E402
 from src.pairs import make_pairs, split_ids  # noqa: E402
-from src.verifiers.keystroke import batch_hard_triplet_loss, build_model, embed, embedding_scores  # noqa: E402
+from src.verifiers.keystroke import (batch_hard_triplet_loss, build_model, embed, embedding_scores,  # noqa: E402
+                                     embedding_spread, supervised_contrastive_loss)
 
 
 def read_participants(pairs_csv: Path):
@@ -53,6 +54,9 @@ def main():
     parser.add_argument("--participants-per-batch", type=int, default=64)
     parser.add_argument("--sentences-per-participant", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--loss", choices=("supcon", "triplet"), default="supcon",
+                        help="supcon = supervised contrastive (default, stable); triplet = batch-hard triplet (TypeNet)")
+    parser.add_argument("--temperature", type=float, default=0.1, help="supervised contrastive temperature")
     parser.add_argument("--margin", type=float, default=0.2, help="triplet loss margin")
     parser.add_argument("--max-len", type=int, default=DEFAULT_MAX_LEN, help="keys per sentence")
     parser.add_argument("--val-users", type=int, default=500, help="training participants held out for validation")
@@ -100,14 +104,16 @@ def main():
     best = {"eer": float("inf"), "epoch": 0}
     with args.log.open("w", newline="", encoding="utf-8") as log_file:
         log = csv.writer(log_file)
-        log.writerow(["epoch", "train_loss", "val_eer", "seconds"])
+        log.writerow(["epoch", "train_loss", "val_eer", "embedding_spread", "seconds"])
         for epoch in range(1, args.epochs + 1):
             model.train()
             t0, losses = time.time(), []
             for batch in pk_batches(train_groups, args.participants_per_batch, args.sentences_per_participant, rng):
                 idx = torch.tensor(batch)
                 emb = model(x_all[idx].to(device), len_all[idx])
-                loss = batch_hard_triplet_loss(emb, torch.from_numpy(labels_all[batch]).to(device), args.margin)
+                labels = torch.from_numpy(labels_all[batch]).to(device)
+                loss = (supervised_contrastive_loss(emb, labels, args.temperature) if args.loss == "supcon"
+                        else batch_hard_triplet_loss(emb, labels, args.margin))
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -115,12 +121,16 @@ def main():
 
             emb = embed(model, data, device)
             val = compute_eer(embedding_scores(emb, val_a, val_b), val_y)
+            spread = embedding_spread(emb[np.unique(np.concatenate([val_a, val_b]))])
             seconds = time.time() - t0
-            log.writerow([epoch, f"{np.mean(losses):.4f}", f"{val.eer:.4f}", f"{seconds:.0f}"])
+            log.writerow([epoch, f"{np.mean(losses):.4f}", f"{val.eer:.4f}", f"{spread:.4f}", f"{seconds:.0f}"])
             log_file.flush()
             improved = val.eer < best["eer"]
-            print(f"epoch {epoch:3d} | loss {np.mean(losses):.4f} | val EER {val.eer:.2%} | {seconds:.0f}s"
+            print(f"epoch {epoch:3d} | loss {np.mean(losses):.4f} | val EER {val.eer:.2%} | spread {spread:.4f} | {seconds:.0f}s"
                   f"{'  <- best' if improved else ''}", flush=True)
+            if spread < 1e-3:
+                print("  warning: embeddings have collapsed (almost identical for everyone); "
+                      "try --loss supcon or a lower --lr", flush=True)
             if improved:
                 best = {"eer": val.eer, "epoch": epoch}
                 torch.save({"state_dict": model.state_dict(), "config": model.config, "max_len": args.max_len,

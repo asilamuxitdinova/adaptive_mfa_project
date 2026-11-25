@@ -65,8 +65,18 @@ def plot(path, curves, labels):
     fig, axes = plt.subplots(1, len(curves), figsize=(6 * len(curves), 4))
     axes = np.atleast_1d(axes)
     for ax, (name, (scores, res)) in zip(axes, curves.items()):
-        ax.hist(scores[labels == 1], bins=60, alpha=0.6, density=True, label="same person")
-        ax.hist(scores[labels == 0], bins=60, alpha=0.6, density=True, label="different people")
+        scores = scores.astype(np.float64)
+        spread = float(np.ptp(scores))
+        if spread < 1e-6:            # (almost) identical scores: the model cannot tell people apart
+            print(f"  warning: {name}: all scores are nearly identical (spread {spread:.2e}); "
+                  "the embeddings have collapsed")
+            ax.text(0.5, 0.5, "scores nearly identical\n(embeddings collapsed)", ha="center", va="center",
+                    transform=ax.transAxes)
+            ax.set_title(name)
+            continue
+        bins = np.linspace(scores.min(), scores.max(), 61)
+        ax.hist(scores[labels == 1], bins=bins, alpha=0.6, density=True, label="same person")
+        ax.hist(scores[labels == 0], bins=bins, alpha=0.6, density=True, label="different people")
         ax.axvline(res.threshold, color="k", linestyle="--", linewidth=1, label=f"EER threshold ({res.eer:.1%})")
         ax.set_title(name)
         ax.set_xlabel("similarity score")

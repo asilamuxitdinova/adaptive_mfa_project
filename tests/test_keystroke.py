@@ -123,3 +123,31 @@ def test_train_and_evaluate_scripts_end_to_end(tmp_path):
     assert summary["test_participants"] == 12
     assert summary["typenet"]["eer"] < 0.4               # learned something on unseen typists
     assert (results / "keystroke_results.md").exists()
+
+
+def test_supervised_contrastive_loss_prefers_separated_people():
+    from src.verifiers.keystroke import supervised_contrastive_loss
+    labels = torch.tensor([0, 0, 1, 1, 2, 2])
+    separated = torch.nn.functional.normalize(torch.eye(6, 3)[[0, 0, 1, 1, 2, 2]] + 1e-3 * torch.randn(6, 3), dim=1)
+    collapsed = torch.nn.functional.normalize(torch.ones(6, 3), dim=1)
+    good, bad = supervised_contrastive_loss(separated, labels), supervised_contrastive_loss(collapsed, labels)
+    assert good < bad
+    assert bad == pytest.approx(np.log(5), abs=1e-4)      # all similarities equal: 1 positive among 5 others
+
+
+def test_embedding_spread_detects_collapse():
+    from src.verifiers.keystroke import embedding_spread
+    assert embedding_spread(np.ones((10, 8), dtype=np.float32)) == 0.0
+    assert embedding_spread(np.random.default_rng(0).normal(size=(10, 8))) > 0.5
+
+
+def test_training_log_records_spread_and_triplet_option_still_runs(tmp_path):
+    write_dataset(tmp_path, train_ids=list(range(1, 21)), test_ids=[100, 101])
+    result = subprocess.run(
+        [sys.executable, "scripts/train_keystroke.py", "--data", str(tmp_path / "data"), "--out", str(tmp_path / "m.pt"),
+         "--log", str(tmp_path / "log.csv"), "--epochs", "2", "--participants-per-batch", "4",
+         "--sentences-per-participant", "4", "--val-users", "4", "--device", "cpu", "--loss", "triplet"],
+        cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    header = (tmp_path / "log.csv").read_text().splitlines()[0]
+    assert header == "epoch,train_loss,val_eer,embedding_spread,seconds"
