@@ -51,12 +51,18 @@ def pixel_features(faces: np.ndarray) -> np.ndarray:
 
 
 class FaceEmbedder:
-    """MTCNN alignment + FaceNet embedding. `pretrained=None` gives random weights (tests only)."""
+    """
+    MTCNN alignment + FaceNet embedding. `pretrained=None` gives random weights (tests only).
+    `selection`: which face to use when a photo has several (MTCNN's selection_method).
+    """
 
-    def __init__(self, device="cpu", pretrained="vggface2"):
+    def __init__(self, device="cpu", pretrained="vggface2", selection="center_weighted_size"):
         from facenet_pytorch import MTCNN, InceptionResnetV1
         self.device = device
-        self.mtcnn = MTCNN(image_size=IMAGE_SIZE, margin=MARGIN, post_process=True, device=device)
+        # LFW photos often show several people; the person of interest is in the centre, so pick the
+        # face that is large AND central (facenet-pytorch's LFW example), not simply the largest.
+        self.mtcnn = MTCNN(image_size=IMAGE_SIZE, margin=MARGIN, post_process=True, device=device,
+                           selection_method=selection)
         self.model = InceptionResnetV1(pretrained=pretrained).eval().to(device)
 
     def align(self, images):

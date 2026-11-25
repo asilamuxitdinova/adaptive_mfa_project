@@ -103,6 +103,9 @@ def main():
     parser.add_argument("--results", type=Path, default=ROOT / "results")
     parser.add_argument("--weights", default="vggface2", choices=("vggface2", "casia-webface", "none"),
                         help="FaceNet weights (none = random, for tests only)")
+    parser.add_argument("--selection", default="center_weighted_size",
+                        choices=("center_weighted_size", "largest", "probability", "largest_over_threshold"),
+                        help="which face to use when a photo shows several people (run 1 used 'largest')")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()
@@ -118,7 +121,8 @@ def main():
           f"{len(images):,} distinct images | {len(np.unique(folds))} folds")
 
     t0 = time.time()
-    embedder = FaceEmbedder(device, pretrained=None if args.weights == "none" else args.weights)
+    embedder = FaceEmbedder(device, pretrained=None if args.weights == "none" else args.weights,
+                            selection=args.selection)
     emb = embedder.embed_files([ROOT / p if not Path(p).is_absolute() else Path(p) for p in images],
                                batch_size=args.batch_size)
     seconds = time.time() - t0
@@ -136,7 +140,7 @@ def main():
     both_found = emb.detected[rows_a] & emb.detected[rows_b]
     args.results.mkdir(parents=True, exist_ok=True)
     summary = {"date": str(date.today()), "pairs": int(len(labels)), "images": len(images),
-               "weights": args.weights, "device": device, "embedding_seconds": round(seconds, 1),
+               "weights": args.weights, "face_selection": args.selection, "device": device, "embedding_seconds": round(seconds, 1),
                "face_detection_rate": detection_rate, "pairs_with_both_faces_found": int(both_found.sum()),
                "paper_table_i": PAPER, **results}
     (args.results / "face_results.json").write_text(json.dumps(summary, indent=2))
@@ -144,7 +148,8 @@ def main():
     lines = ["# Face verification results (Stage 2)", "",
              f"LFW's official {len(labels):,} pairs ({labels.sum():,} same person, {len(labels) - labels.sum():,} "
              f"different people, 10 folds), {len(images):,} distinct images. MTCNN found a face in "
-             f"{detection_rate:.2%} of the images (the central crop was used for the rest). "
+             f"{detection_rate:.2%} of the images (the central crop was used for the rest); when a photo showed "
+             f"several faces, the `{args.selection}` one was used. "
              f"Generated {summary['date']} by `scripts/evaluate_face.py`.", "",
              "| Verifier | EER | LFW accuracy (10-fold) | FRR when FAR = 1% | FAR when FRR = 20% |",
              "|---|---|---|---|---|"]

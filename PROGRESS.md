@@ -287,7 +287,7 @@ python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_en
 
 **Options:** `train_keystroke.py --all-participants` trains on all ~78,000 training participants (TypeNet used ~68,000) without rebuilding the pair files, so the test set stays the same.
 
-### Stage 2: Face verifier (pretrained, evaluation only; ready, not yet run on the server)
+### Stage 2: Face verifier (pretrained, evaluation only: run 1 EER 5.60%)
 
 **Approach:** no training. A well-known pretrained model is measured on LFW's official benchmark.
 - **MTCNN** finds and aligns the face in each photo (160×160 crop). If no face is found, the central part of the photo is used and the photo is counted as a **detection failure**. Detection failures will matter in Stage 3, where dark or blurred photos make detection fail.
@@ -308,6 +308,33 @@ uv pip install torchvision requests tqdm && uv pip install --no-deps facenet-pyt
 python scripts/evaluate_face.py                 # writes results/face_results.{md,json} and face_scores.png
 ```
 
+**Run 1 on LFW (2026-11-25, MTCNN picks the largest face):** 6,000 official pairs, 7,701 distinct images; MTCNN found a face in 100% of them.
+
+| Verifier | EER | LFW accuracy (10-fold) | FRR when FAR = 1% | FAR when FRR = 20% |
+|---|---|---|---|---|
+| Baseline (32×32 pixels, no learning) | 35.97% | 63.97% ± 1.78% | 92.03% | 57.00% |
+| **FaceNet, pretrained on VGGFace2** | **5.60%** | **96.23% ± 0.89%** | 6.40% | 0.03% |
+| *Paper, Table I (from literature)* | *lip 6.8%, texture 10%, brow/cheek 15%* | | *FRR 20% at FAR 1%* | |
+
+- **The pretrained model is far better than pixels:** EER 36% → 5.6%.
+- **Better than the paper's assumed values:** at the paper's FAR of 1%, FaceNet rejects only 6.4% of real users, against the paper's 20%. At the paper's FRR of 20%, it would accept just 0.03% of impostors. The EER (5.6%) is a bit below the paper's best single face feature (lip, 6.8%).
+- **But below the published result for this model:** facenet-pytorch reports **99.65%** LFW accuracy for these weights; we got 96.23%. The likely cause is **face selection**: many LFW photos show several people, and run 1 took the **largest** face, which is sometimes the wrong person. facenet-pytorch's own LFW evaluation picks the face that is large **and central** (`center_weighted_size`). That is now the default, and run 2 checks it (`--selection largest` reproduces run 1).
+- **Fast and light:** 7,701 photos in about a minute on the GPU, so Stage 3's degraded re-runs (darkened or blurred photos) will be cheap.
+
+**GPU usage during face run 1:**
+
+| Metric | Value |
+|---|---|
+| GPU | NVIDIA L4 |
+| Active duration | 1.1 min |
+| GPU utilization | average 16%, peak 29% |
+| GPU memory used (peak) | 904 MiB of 23,034 MiB |
+| Power draw | average 36.6 W, peak 42.4 W |
+| Energy used (approx.) | 0.7 Wh |
+| Max temperature | 56 °C |
+
+The GPU was mostly waiting: reading the JPEG files and running MTCNN face detection take most of the time, not the embedding model.
+
 ### Planned stages
 
 - [x] **Stage 1: Dataset preparation.**
@@ -324,7 +351,7 @@ python scripts/evaluate_face.py                 # writes results/face_results.{m
   - [x] Train the keystroke model on the server and evaluate it on the test participants: **EER 4.69%** (run 3; run 2: 9.94%, run 1: 22.07%), baseline 26.52%
   - [x] Keystroke: more epochs + all ~78,000 participants (run 3)
   - [x] Keystroke enrolment evaluation: **EER 2.49% with 10 enrolment sentences** (2.79% with 5, 5.12% with 1)
-  - [ ] Face verifier on LFW (pretrained FaceNet, evaluation only): code ready and tested, run on the server
+  - [ ] Face verifier on LFW (pretrained FaceNet, evaluation only): run 1 **EER 5.60%**, LFW accuracy 96.23%; run 2 with centre-weighted face selection pending
   - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
 - [ ] **Stage 4: Context sensing.** Train a human-activity classifier (walking vs still) on the motion data. Light (lux) and noise level (dB) are measured directly from the device's sensors, so no model is needed for them. A scene classifier is optional.

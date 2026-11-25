@@ -97,7 +97,7 @@ def summarize(rows, training_log=None):
 
 
 def to_markdown(s, title):
-    lines = [f"## {title}", "", f"Recorded with `nvidia-smi` every few seconds; idle time before and after training trimmed.", "",
+    lines = [f"## {title}", "", f"Recorded with `nvidia-smi` every few seconds; idle time before and after the run trimmed.", "",
              "| Metric | Value |", "|---|---|",
              f"| GPU | {s['gpu']} |",
              f"| Active duration | {fmt(s['duration_min'], 'min', 1)} ({s['samples']} samples) |",
@@ -117,14 +117,15 @@ def main():
     parser.add_argument("log", type=Path, help="CSV written by nvidia-smi --format=csv")
     parser.add_argument("--training-log", type=Path, help="per-epoch training log (adds epochs and training time)")
     parser.add_argument("--out", type=Path, help="write the summary as Markdown to this file")
-    parser.add_argument("--title", default="GPU usage during keystroke training")
+    parser.add_argument("--title", help="heading (default: from the log name, e.g. face_gpu_log.csv -> 'GPU usage: face')")
     args = parser.parse_args()
 
     summary = summarize(read_log(args.log), args.training_log)
     if summary is None:
         print("no GPU activity found in the log (all rows idle or unreadable)")
         return 1
-    text = to_markdown(summary, args.title)
+    title = args.title or f"GPU usage: {args.log.stem.removesuffix('_gpu_log').replace('_', ' ')}"
+    text = to_markdown(summary, title)
     print(text)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
