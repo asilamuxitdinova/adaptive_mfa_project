@@ -151,3 +151,21 @@ def test_training_log_records_spread_and_triplet_option_still_runs(tmp_path):
     assert result.returncode == 0, result.stderr
     header = (tmp_path / "log.csv").read_text().splitlines()[0]
     assert header == "epoch,train_loss,val_eer,embedding_spread,seconds"
+
+
+def test_all_participants_reads_training_split_not_pair_list(tmp_path):
+    write_dataset(tmp_path, train_ids=list(range(1, 31)), test_ids=[100, 101])
+    pairs = tmp_path / "data/pairs/keystroke_train.csv"            # pair list mentions only some participants
+    rows = pairs.read_text().splitlines()
+    keep = [rows[0]] + [r for r in rows[1:] if r.split(",")[3] in {"1", "2", "3", "4", "5"}
+                        and r.split(",")[4] in {"1", "2", "3", "4", "5"}]
+    pairs.write_text("\n".join(keep) + "\n")
+    common = ["scripts/train_keystroke.py", "--data", str(tmp_path / "data"), "--epochs", "1",
+              "--participants-per-batch", "4", "--sentences-per-participant", "4", "--val-users", "4", "--device", "cpu"]
+    listed = subprocess.run([sys.executable, *common, "--out", str(tmp_path / "a.pt"), "--log", str(tmp_path / "a.csv")],
+                            cwd=ROOT, capture_output=True, text=True)
+    everyone = subprocess.run([sys.executable, *common, "--all-participants", "--out", str(tmp_path / "b.pt"),
+                               "--log", str(tmp_path / "b.csv")], cwd=ROOT, capture_output=True, text=True)
+    assert listed.returncode == 0 and everyone.returncode == 0, listed.stderr + everyone.stderr
+    assert "loaded 40 sentences" in listed.stdout          # 5 participants x 8 sentences
+    assert "loaded 240 sentences" in everyone.stdout       # all 30 participants

@@ -1,13 +1,14 @@
 """
 Stage 2: train the TypeNet-style keystroke verifier on the Aalto training participants.
 
-Uses the participants listed in data/pairs/keystroke_train.csv (from prepare_data.py) and all
-of their typed sentences. A small group of them is held out for validation: after every epoch
+Uses the participants listed in data/pairs/keystroke_train.csv (from prepare_data.py), or with
+--all-participants every participant in the training split, and all of their typed sentences. A small group of them is held out for validation: after every epoch
 the validation EER is measured, and the best model is kept (with early stopping).
 
 Run from the project root (uses the GPU automatically when available):
     python scripts/train_keystroke.py
     python scripts/train_keystroke.py --epochs 5 --limit-users 500     # quick check
+    python scripts/train_keystroke.py --all-participants --epochs 200 --patience 15   # largest run
 
 Outputs:
     models/keystroke_typenet.pt              best model + settings (gitignored)
@@ -38,6 +39,23 @@ def read_participants(pairs_csv: Path):
         return sorted({r[k] for r in csv.DictReader(f) for k in ("participant_a", "participant_b")})
 
 
+def participants_in_split(parquet_dir: Path, split: str):
+    """All participant ids in the '<split>-*.parquet' files (reads only that one column)."""
+    import pyarrow.parquet as pq
+
+    ids = set()
+    for f in sorted(Path(parquet_dir).glob(f"{split}-*.parquet")):
+        ids.update(str(p) for p in pq.read_table(f, columns=["participant_id"]).column(0).to_pylist())
+    return sorted(ids)
+
+
+def subset(data, rows):
+    """A KeystrokeSet with only the given rows (indices re-numbered from 0)."""
+    sections = data.sections[rows]
+    return type(data)(data.x[rows], data.lengths[rows], data.participants[rows], sections,
+                      {s: i for i, s in enumerate(sections)})
+
+
 def validation_pairs(groups, rng):
     """Row-index pairs for validation participants (5 genuine + 5 impostor per person)."""
     pairs = make_pairs(groups, rng, max_genuine_per_id=5)
@@ -60,6 +78,9 @@ def main():
     parser.add_argument("--margin", type=float, default=0.2, help="triplet loss margin")
     parser.add_argument("--max-len", type=int, default=DEFAULT_MAX_LEN, help="keys per sentence")
     parser.add_argument("--val-users", type=int, default=500, help="training participants held out for validation")
+    parser.add_argument("--all-participants", action="store_true",
+                        help="train on every participant in the training split (~78,000) instead of the "
+                             "10,000 listed in keystroke_train.csv; the test participants are unaffected")
     parser.add_argument("--limit-users", type=int, default=0, help="use only this many participants (0 = all)")
     parser.add_argument("--device", default="auto", help="auto, cuda or cpu")
     parser.add_argument("--seed", type=int, default=42)
@@ -72,26 +93,30 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    participants = read_participants(args.data / "pairs" / "keystroke_train.csv")
+    parquet_dir = args.data / "raw" / "keystroke" / "data"
+    participants = (participants_in_split(parquet_dir, "train") if args.all_participants
+                    else read_participants(args.data / "pairs" / "keystroke_train.csv"))
     if args.limit_users:
         participants = sorted(rng.sample(participants, min(args.limit_users, len(participants))))
-    val_fraction = min(args.val_users, len(participants) // 5) / len(participants)
+    n_val = max(2, min(args.val_users, len(participants) // 5))      # validation pairs need 2+ people
+    if len(participants) < n_val + 2:
+        raise SystemExit(f"need at least {n_val + 2} participants, found {len(participants)}")
+    val_fraction = n_val / len(participants)
     train_ids, val_ids = split_ids(participants, val_fraction, rng)
     print(f"device {device} | {len(train_ids)} training + {len(val_ids)} validation participants")
 
     t0 = time.time()
-    data = load_sequences(args.data / "raw" / "keystroke" / "data", "train", participants=participants, max_len=args.max_len)
+    data = load_sequences(parquet_dir, "train", participants=participants, max_len=args.max_len)
     print(f"loaded {len(data.x):,} sentences in {time.time() - t0:.0f}s")
 
     train_mask = np.isin(data.participants, train_ids)
-    train_part = type(data)(data.x[train_mask], data.lengths[train_mask], data.participants[train_mask],
-                            data.sections[train_mask], {})
-    scaler = Standardizer.fit(train_part)
+    scaler = Standardizer.fit(subset(data, np.flatnonzero(train_mask)))
     data = scaler.transform(data)
 
     groups = data.by_participant()
     train_groups = {p: groups[p] for p in train_ids if p in groups}
-    val_a, val_b, val_y = validation_pairs({p: groups[p] for p in val_ids if p in groups}, rng)
+    val_data = subset(data, np.flatnonzero(np.isin(data.participants, val_ids)))   # only these are embedded per epoch
+    val_a, val_b, val_y = validation_pairs(val_data.by_participant(), rng)
     label_of = {p: i for i, p in enumerate(sorted(groups))}
     labels_all = np.array([label_of[p] for p in data.participants])
 
@@ -119,9 +144,9 @@ def main():
                 optimizer.step()
                 losses.append(loss.item())
 
-            emb = embed(model, data, device)
+            emb = embed(model, val_data, device)
             val = compute_eer(embedding_scores(emb, val_a, val_b), val_y)
-            spread = embedding_spread(emb[np.unique(np.concatenate([val_a, val_b]))])
+            spread = embedding_spread(emb)
             seconds = time.time() - t0
             log.writerow([epoch, f"{np.mean(losses):.4f}", f"{val.eer:.4f}", f"{spread:.4f}", f"{seconds:.0f}"])
             log_file.flush()
