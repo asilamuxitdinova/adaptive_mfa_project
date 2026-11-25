@@ -87,11 +87,12 @@ adaptive_mfa_project/
 │   ├── inspect_datasets.py     # Stage 1 dataset inspection
 │   ├── prepare_data.py         # Stage 1 download + pair building
 │   ├── train_keystroke.py      # Stage 2 keystroke training
-│   ├── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR
+│   ├── evaluate_keystroke.py   # Stage 2 keystroke EER / FAR / FRR (one sentence vs one sentence)
+│   ├── evaluate_keystroke_enrolment.py  # Stage 2 keystroke EER with 1-10 enrolment sentences
 │   └── summarize_gpu_log.py    # GPU usage summary from an nvidia-smi log
 ├── results/
 │   └── dataset_inspection.md   # generated inspection report
-└── tests/                      # 33 tests, all passing
+└── tests/                      # 36 tests, all passing
     ├── test_metrics.py
     ├── test_pairs.py
     ├── test_prepare_data.py    # runs prepare_data.py on tiny fake datasets
@@ -246,7 +247,17 @@ The model is small, so the GPU is far from fully used; much larger runs (more ep
 
 Each epoch took ~13 s instead of ~2 s, because there were 8× more participants; memory stayed the same, because batch size did not change. The GPU was still only ~40% busy: the small LSTM and the data handling on the CPU are the limit, not the GPU. This run used about 15× more energy than run 2 to halve the EER.
 
-**Possible next step:** evaluate with **enrolment**: compare a new sentence against a profile averaged from several of the user's sentences, as real systems and TypeNet do. This is likely to close much of the remaining gap to the paper's values.
+**Enrolment evaluation** (`scripts/evaluate_keystroke_enrolment.py`, ready, not yet run on the server). All the results above compare **one sentence with one sentence**. A real system first records several sentences from the user (enrolment) and compares each new login sentence with all of them. This evaluation measures how the error falls as the user enrols more sentences:
+- Same 2,000 test participants (never seen in training), same trained model (run 3), no retraining.
+- Each participant's 15 sentences are shuffled once: the **last 5 are login attempts**; the **first G of the other 10 are the enrolment**, for G = 1, 2, 5, 7, 10.
+- **Genuine:** the user's own login sentences vs their enrolment. **Impostor:** one login sentence from each of 5 other test participants vs this user's enrolment. That gives 10,000 genuine + 10,000 impostor attempts per G.
+- **Score:** the average similarity between the login sentence and each enrolment sentence.
+- The same login sentences are used for every G, so only the amount of enrolment changes. G = 1 is close to the single-sentence setting, a sanity check against 4.69%.
+- The baseline is evaluated the same way, and the paper's values are shown for comparison.
+
+```bash
+python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_enrolment.{md,json,png}
+```
 
 **Sanity check on synthetic data (laptop):** 80 fake typists with distinct rhythms, 30 unseen test typists → baseline EER 10%, trained model **4%**. This only shows the pipeline learns; synthetic typing is far easier than real typing.
 
@@ -267,7 +278,7 @@ Each epoch took ~13 s instead of ~2 s, because there were 8× more participants;
   - [x] Keystroke verifier code: data loader, baseline, TypeNet-style LSTM, training and evaluation scripts, tested on synthetic typists (see below)
   - [x] Train the keystroke model on the server and evaluate it on the test participants: **EER 4.69%** (run 3; run 2: 9.94%, run 1: 22.07%), baseline 26.52%
   - [x] Keystroke: more epochs + all ~78,000 participants (run 3)
-  - [ ] Optional keystroke improvement: enrolment with several sentences
+  - [ ] Keystroke enrolment evaluation (1-10 enrolment sentences): script ready, run on the server
   - [ ] Face verifier on LFW (pretrained model, evaluation only)
   - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.

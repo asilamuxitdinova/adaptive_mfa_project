@@ -169,3 +169,55 @@ def test_all_participants_reads_training_split_not_pair_list(tmp_path):
     assert listed.returncode == 0 and everyone.returncode == 0, listed.stderr + everyone.stderr
     assert "loaded 40 sentences" in listed.stdout          # 5 participants x 8 sentences
     assert "loaded 240 sentences" in everyone.stdout       # all 30 participants
+
+
+def load_enrolment_script():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("enrolment", ROOT / "scripts/evaluate_keystroke_enrolment.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_enrolment_protocol_keeps_login_and_enrolment_apart():
+    m = load_enrolment_script()
+    groups = {f"p{i}": list(range(i * 10, i * 10 + 10)) for i in range(6)}
+    groups["short"] = [100, 101, 102]                                # too few sentences: excluded
+    users, enrol, queries, impostor = m.build_protocol(groups, max_enrol=4, n_queries=3, rng=random.Random(0))
+    assert "short" not in users and enrol.shape == (6, 4) and queries.shape == impostor.shape == (6, 3)
+    owner = {r: p for p, rows in groups.items() for r in rows}
+    for i, p in enumerate(users):
+        assert not set(enrol[i]) & set(queries[i])                   # login sentences never enrolled
+        assert all(owner[r] == p for r in [*enrol[i], *queries[i]])
+        impostors = [owner[r] for r in impostor[i]]
+        assert p not in impostors and len(set(impostors)) == 3       # 3 different other people
+
+
+def test_enrolment_scores_average_over_enrolled_sentences():
+    m = load_enrolment_script()
+    emb = np.array([[1, 0], [0, 1], [1, 0], [0, 1]], dtype=np.float32)
+    scores, labels = m.enrolment_scores(m.cosine_similarity(emb), np.array([[0, 1], [2, 3]]),
+                                        np.array([[2], [0]]), np.array([[1], [3]]), g=2)
+    assert labels.tolist() == [1, 1, 0, 0]
+    assert np.allclose(scores, [0.5, 0.5, 0.5, 0.5])                # half of each enrolment matches
+    scores, _ = m.enrolment_scores(m.cosine_similarity(emb), np.array([[0, 1], [2, 3]]),
+                                   np.array([[2], [0]]), np.array([[1], [3]]), g=1)
+    assert np.allclose(scores, [1, 1, 0, 0])                         # only the first enrolled sentence
+
+
+def test_enrolment_script_end_to_end(tmp_path):
+    write_dataset(tmp_path, train_ids=list(range(1, 41)), test_ids=list(range(100, 116)))
+    model, results = tmp_path / "models/k.pt", tmp_path / "results"
+    run = lambda *a: subprocess.run([sys.executable, *a], cwd=ROOT, capture_output=True, text=True)  # noqa: E731
+    train = run("scripts/train_keystroke.py", "--data", str(tmp_path / "data"), "--out", str(model),
+                "--log", str(results / "log.csv"), "--epochs", "6", "--participants-per-batch", "8",
+                "--sentences-per-participant", "4", "--val-users", "8", "--device", "cpu")
+    assert train.returncode == 0, train.stderr
+    ev = run("scripts/evaluate_keystroke_enrolment.py", "--data", str(tmp_path / "data"), "--model", str(model),
+             "--results", str(results), "--enrol", "1", "3", "--queries", "3", "--device", "cpu")
+    assert ev.returncode == 0, ev.stderr
+    import json
+    summary = json.loads((results / "keystroke_enrolment.json").read_text())
+    assert summary["test_participants"] == 16 and summary["genuine_attempts"] == 48
+    assert set(summary["results"]["TypeNet-style LSTM (trained)"]) == {"1", "3"}
+    assert "G = 3" in (results / "keystroke_enrolment.md").read_text()
