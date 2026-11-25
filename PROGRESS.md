@@ -11,7 +11,7 @@ Tracks the progress of turning the adaptive MFA approach from the paper below in
 | Step | Description | Status |
 |---|---|---|
 | 1 | Simulation demo of the paper's adaptive selection approach | ✅ Done |
-| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 done on the GPU server; Stage 2 started with the keystroke verifier (code ready, server training next) |
+| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 done; Stage 2 keystroke verifier trained (test EER 9.94%); face and voice next |
 
 ---
 
@@ -151,7 +151,7 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
 - treats a scene classifier as an **optional extra** (the complete 10-scene TUT 2018 dataset, 15 GB, could be added later on the server).
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
-### Stage 2: Keystroke verifier (code ready, not yet trained on real data)
+### Stage 2: Keystroke verifier (trained: test EER 9.94%)
 
 **Approach**, following TypeNet (Acien et al., *IEEE T-BIOM* 2021), which introduced deep keystroke verification on this Aalto dataset:
 - Each typed sentence becomes a sequence of up to 50 keys; each key has its code and four timings: hold time (`hl`) and three gaps to the next key (`il`, `pl`, `rl`). Timings are standardized with training statistics only.
@@ -186,7 +186,37 @@ python scripts/evaluate_keystroke.py                             # EER / FAR / F
 - Training helped only a little (26.5% → 22.1%). The training loss stayed at 0.2003, the triplet margin, for the last epochs and validation EER fluctuated between 21% and 25%: the near-collapse described above. Epochs took about 2 seconds each on the L4.
 - Each test pair compares **one sentence with one sentence**, the hardest setting; systems that compare a new sentence with a profile of several enrolled sentences report much lower errors.
 - At the paper's operating point (only 0.1% of real users rejected), 66% of impostors would be accepted, so the paper's FAR of 7% looks very optimistic for single sentences.
-- **Next:** retrain with supervised contrastive loss (run 2), then consider enrolment with several sentences per user and training on all ~78,000 participants.
+- **Next:** retrain with supervised contrastive loss (run 2).
+
+**Run 2 on real data (2026-11-25, supervised contrastive loss):** same 20,000 test pairs from 2,000 unseen participants.
+
+| Verifier | EER | FAR at EER | FRR at EER | FAR when FRR = 0.1% |
+|---|---|---|---|---|
+| Baseline (no training) | 26.52% | 26.52% | 26.52% | 99.81% |
+| TypeNet-style LSTM, triplet loss (run 1) | 22.07% | 21.13% | 23.00% | 65.75% |
+| **TypeNet-style LSTM, supervised contrastive (run 2)** | **9.94%** | 9.94% | 9.94% | 52.16% |
+| *Paper, Table I (from literature)* | *crossover 1.8%* | | | *FAR 7% at FRR 0.1%* |
+
+- **The loss change fixed the near-collapse:** EER more than halved (22.07% → 9.94%), the embedding spread stayed steady around 0.08, and the training loss kept falling.
+- **No overfitting:** validation EER 9.48% (best, epoch 47) vs test EER 9.94% on participants never seen in training.
+- **Not finished learning:** training stopped at the 50-epoch limit with the loss still decreasing (3.4148 at epoch 50), so more epochs are likely to help.
+- The gap to the paper's 1.8% remains large; part of it is the single-sentence vs single-sentence protocol.
+
+**GPU usage during run 2** (`nvidia-smi` every 5 s, summarized with `scripts/summarize_gpu_log.py`):
+
+| Metric | Value |
+|---|---|
+| GPU | NVIDIA L4 |
+| Training time | 1.7 min (50 epochs, ~2 s each) |
+| GPU utilization | average 42%, peak 72% |
+| GPU memory used (peak) | 902 MiB of 23,034 MiB |
+| Power draw | average 52.5 W, peak 59.4 W |
+| Energy used (approx.) | 1.5 Wh |
+| Max temperature | 70 °C |
+
+The model is small, so the GPU is far from fully used; much larger runs (more epochs, all ~78,000 participants) are cheap.
+
+**Possible next runs:** (1) more epochs; (2) train on all ~78,000 participants (`prepare_data.py --only keystroke --keystroke-train-users 0`, then retrain); (3) evaluate with **enrolment**: compare a new sentence with a profile averaged from several of the user's sentences, as real systems and TypeNet do.
 
 **Sanity check on synthetic data (laptop):** 80 fake typists with distinct rhythms, 30 unseen test typists → baseline EER 10%, trained model **4%**. This only shows the pipeline learns; synthetic typing is far easier than real typing.
 
@@ -205,7 +235,8 @@ python scripts/evaluate_keystroke.py                             # EER / FAR / F
   - [ ] Request access to the gated datasets (full VoxCeleb), only if needed later
 - [ ] **Stage 2: Per-factor verifiers.** *(in progress)* Measure real **EER, FAR and FRR** for each factor. Face and voice use pretrained models (evaluation only); keystroke is the only model trained here.
   - [x] Keystroke verifier code: data loader, baseline, TypeNet-style LSTM, training and evaluation scripts, tested on synthetic typists (see below)
-  - [ ] Train the keystroke model on the server and evaluate it on the test participants
+  - [x] Train the keystroke model on the server and evaluate it on the test participants: **EER 9.94%** (run 2), baseline 26.52%
+  - [ ] Optional keystroke improvements: more epochs, all ~78,000 participants, enrolment with several sentences
   - [ ] Face verifier on LFW (pretrained model, evaluation only)
   - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
