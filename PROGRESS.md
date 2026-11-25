@@ -11,7 +11,7 @@ Tracks the progress of turning the adaptive MFA approach from the paper below in
 | Step | Description | Status |
 |---|---|---|
 | 1 | Simulation demo of the paper's adaptive selection approach | ✅ Done |
-| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 done; Stage 2 keystroke verifier trained (test EER 4.69%); face and voice next |
+| 2 | Real ML-based adaptive MFA trained on public datasets | 🚧 In progress: Stage 1 done; Stage 2 keystroke verifier trained (test EER 4.69% single sentence, 2.49% with 10 enrolment sentences); face and voice next |
 
 ---
 
@@ -152,7 +152,7 @@ Run on the GPU server (Python 3.12 via `uv`, PyTorch 2.15 + CUDA 13.2, NVIDIA L4
 - treats a scene classifier as an **optional extra** (the complete 10-scene TUT 2018 dataset, 15 GB, could be added later on the server).
 - **Compute:** development and small subsets on a laptop (CPU); full evaluations, degradation sweeps and any fine-tuning on a server with an **NVIDIA L4 GPU (24 GB)**. The code will use the GPU automatically when available.
 
-### Stage 2: Keystroke verifier (trained: test EER 4.69%)
+### Stage 2: Keystroke verifier (trained: test EER 4.69%; 2.49% with enrolment)
 
 **Approach**, following TypeNet (Acien et al., *IEEE T-BIOM* 2021), which introduced deep keystroke verification on this Aalto dataset:
 - Each typed sentence becomes a sequence of up to 50 keys; each key has its code and four timings: hold time (`hl`) and three gaps to the next key (`il`, `pl`, `rl`). Timings are standardized with training statistics only.
@@ -247,7 +247,7 @@ The model is small, so the GPU is far from fully used; much larger runs (more ep
 
 Each epoch took ~13 s instead of ~2 s, because there were 8× more participants; memory stayed the same, because batch size did not change. The GPU was still only ~40% busy: the small LSTM and the data handling on the CPU are the limit, not the GPU. This run used about 15× more energy than run 2 to halve the EER.
 
-**Enrolment evaluation** (`scripts/evaluate_keystroke_enrolment.py`, ready, not yet run on the server). All the results above compare **one sentence with one sentence**. A real system first records several sentences from the user (enrolment) and compares each new login sentence with all of them. This evaluation measures how the error falls as the user enrols more sentences:
+**Enrolment evaluation** (`scripts/evaluate_keystroke_enrolment.py`, run 2026-11-25 with the run 3 model). All the results above compare **one sentence with one sentence**. A real system first records several sentences from the user (enrolment) and compares each new login sentence with all of them. This evaluation measures how the error falls as the user enrols more sentences:
 - Same 2,000 test participants (never seen in training), same trained model (run 3), no retraining.
 - Each participant's 15 sentences are shuffled once: the **last 5 are login attempts**; the **first G of the other 10 are the enrolment**, for G = 1, 2, 5, 7, 10.
 - **Genuine:** the user's own login sentences vs their enrolment. **Impostor:** one login sentence from each of 5 other test participants vs this user's enrolment. That gives 10,000 genuine + 10,000 impostor attempts per G.
@@ -258,6 +258,27 @@ Each epoch took ~13 s instead of ~2 s, because there were 8× more participants;
 ```bash
 python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_enrolment.{md,json,png}
 ```
+
+**Enrolment results:** 2,000 of 2,000 test participants used; 10,000 genuine + 10,000 impostor login attempts per setting. G = enrolment sentences per user.
+
+| EER | G = 1 | G = 2 | G = 5 | G = 7 | G = 10 |
+|---|---|---|---|---|---|
+| **TypeNet-style LSTM (run 3 model)** | 5.12% | 3.68% | 2.79% | 2.67% | **2.49%** |
+| Baseline (no training) | 26.23% | 25.20% | 24.20% | 24.24% | 24.06% |
+| *Paper, Table I* | *1.8%* | | | | |
+
+| FAR when FRR = 0.1% | G = 1 | G = 2 | G = 5 | G = 7 | G = 10 |
+|---|---|---|---|---|---|
+| **TypeNet-style LSTM (run 3 model)** | 31.91% | 17.90% | 16.15% | 14.60% | **13.61%** |
+| Baseline (no training) | 99.80% | 99.67% | 99.69% | 99.69% | 99.69% |
+| *Paper, Table I* | *7%* | | | | |
+
+- **Enrolment roughly halves the error:** EER 5.12% with one enrolled sentence → **2.49% with ten**, now close to the paper's 1.8%. FAR at the paper's operating point falls from 32% to 14%.
+- **Most of the gain comes early:** going from 1 to 2 sentences gives the biggest drop (5.12% → 3.68%), and 5 sentences already give 2.79%. After 5 the gains are small. In practice, asking a user to type about **5 sentences at sign-up** gets most of the benefit.
+- **Sanity check passed:** G = 1 (5.12%) is close to the single-sentence result (4.69%). It differs slightly because the login sentences and impostor pairs are different.
+- **The baseline barely improves** (26% → 24%). Averaging only helps when the individual scores already carry information about who is typing.
+- **Remaining gap:** at FRR 0.1% the FAR is still about 2× the paper's 7%. That point is set by the 10 lowest of 10,000 genuine scores, so it is noisier than the EER.
+- **What this means for the adaptive MFA:** keystroke trust should depend on how much the user has enrolled. A new user with one sentence is about 2× less reliable than one with ten.
 
 **Sanity check on synthetic data (laptop):** 80 fake typists with distinct rhythms, 30 unseen test typists → baseline EER 10%, trained model **4%**. This only shows the pipeline learns; synthetic typing is far easier than real typing.
 
@@ -278,7 +299,7 @@ python scripts/evaluate_keystroke_enrolment.py     # writes results/keystroke_en
   - [x] Keystroke verifier code: data loader, baseline, TypeNet-style LSTM, training and evaluation scripts, tested on synthetic typists (see below)
   - [x] Train the keystroke model on the server and evaluate it on the test participants: **EER 4.69%** (run 3; run 2: 9.94%, run 1: 22.07%), baseline 26.52%
   - [x] Keystroke: more epochs + all ~78,000 participants (run 3)
-  - [ ] Keystroke enrolment evaluation (1-10 enrolment sentences): script ready, run on the server
+  - [x] Keystroke enrolment evaluation: **EER 2.49% with 10 enrolment sentences** (2.79% with 5, 5.12% with 1)
   - [ ] Face verifier on LFW (pretrained model, evaluation only)
   - [ ] Voice verifier on mini VoxCeleb (pretrained model, evaluation only)
 - [ ] **Stage 3: Degradation curves.** Re-evaluate each verifier under simulated conditions (darkened or blurred faces, voice mixed with real DEMAND noise such as cafeteria, street or metro at increasing levels) to learn **how EER changes with light, noise and motion**. This is the learned replacement for the paper's T-matrix.
